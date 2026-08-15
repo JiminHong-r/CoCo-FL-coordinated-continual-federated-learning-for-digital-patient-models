@@ -1,0 +1,35 @@
+# --- Credentialed data (PhysioNet DUA: never commit) -------------------------
+# MIMIC-IV derived tables contain subject_id/hadm_id/stay_id level records.
+src/cocofl/preprocess/maps/mimic-iv_derived.csv.gz
+data/
+*.parquet
+
+# --- Model checkpoints & run artifacts ---------------------------------------
+*.pt
+*.pth
+*.ckpt
+wp2_artifacts/
+wp2_artifacts_tfn/
+wp3_artifacts/
+wp4_artifacts/
+results_for_presentation/
+*.log
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- Editor / tooling --------------------------------------------------------
+*.code-workspace
+.vscode/
+.idea/
+.DS_Store

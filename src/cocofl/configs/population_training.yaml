@@ -1,0 +1,52 @@
+# Full-TFN Training Configuration (matches TFN_Temporal-Fusion-Nexus/notebook/training.ipynb)
+# Architecture: StaticEncoder + TimeAwareAttentionEncoder (T-LSTM + temporal attn)
+# Loss: next-token cross-entropy (token sequences from ETHOS tokenization)
+model_type: "population"
+data_fp: ???
+val_size: ???
+# WP2 task 3: exclusive 40% population reserve (data/federated_splits_v2/population_reserve.json).
+# When set, pre-training is restricted to these patients only — no centre / global-test patient is seen.
+population_reserve_path: null
+out_dir: "out_tfn_full"
+log_interval: 50
+resume: false
+use_lr_schedule: false  # TFN uses constant Adam lr
+
+# logging
+wandb_log: false
+wandb_project: "cocofl"
+wandb_run_name: "tfn_full_run"
+
+# training parameters (TFN paper defaults)
+batch_size: 16
+gradient_accumulation_steps: 1
+num_epochs: 3
+n_train_windows: 3000   # ~10K patients worth (TFN-scale subset)
+
+# model parameters (TFN CONFIG: lstm_hidden_size=512, lstm_num_layers=2)
+n_positions: 2048
+n_layer: 2
+n_head: 2  # TFN num_heads
+n_embd: 512  # TFN lstm_hidden_size
+dropout: 0.1
+activation: "gelu"
+
+# optimizer (TFN: Adam lr=0.0003, no weight decay, no grad clip, no warmup)
+max_iters: 100000  # fallback, ignored since num_epochs is set
+lr: 0.0003
+weight_decay: 0.0
+beta1: 0.9
+beta2: 0.999
+grad_clip: 0.0
+warmup_iters: 0
+lr_decay_iters: 0
+min_lr: 0.0003
+
+# system
+backend: "nccl"
+device: "cuda"
+dtype: "bfloat16"
+no_compile: true  # avoid torch.compile interaction with python LSTM loop
+
+hydra:
+  output_subdir: null

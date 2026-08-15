@@ -1,0 +1,42 @@
+# TM-LSTM Training Configuration
+model_type: "tm_lstm"
+data_fp: ???
+val_size: ???
+out_dir: "out_tm_lstm"
+log_interval: 100
+resume: false
+use_lr_schedule: false   # TFN uses constant Adam lr, no warmup/decay
+# logging
+wandb_log: false
+wandb_project: "cocofl"
+wandb_run_name: "tm_lstm_run"
+# training parameters
+gradient_accumulation_steps: 40
+batch_size: 32
+# model parameters (TFN paper defaults: lstm_hidden_size=512, lstm_num_layers=2)
+n_positions: 2048
+n_layer: 2          # TFN lstm_num_layers
+n_head: 4           # Not used for TM-LSTM, but kept for compatibility
+n_embd: 512         # TFN lstm_hidden_size
+dropout: 0.1
+activation: "gelu"
+# optimizer parameters
+num_epochs: 3       # TFN paper default. When set, overrides max_iters automatically.
+max_iters: 50000    # Fallback if num_epochs is null/0
+lr: 0.001
+weight_decay: 0.01
+beta1: 0.9
+beta2: 0.999
+grad_clip: 1.0
+# learning rate schedule
+warmup_iters: 1000
+lr_decay_iters: 40000
+min_lr: 0.0001
+# system
+backend: "nccl"
+device: "cuda"
+dtype: "bfloat16"
+no_compile: false
+
+hydra:
+  output_subdir: null

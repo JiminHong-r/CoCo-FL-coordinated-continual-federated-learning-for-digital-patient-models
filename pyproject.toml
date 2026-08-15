@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cocofl"
+version = "0.1.0"
+description = "CoCo-FL: Coordinated continual federated learning for digital patient model"
+readme = "README.md"
+authors = [
+    { name = "Jimin Hong" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "hydra-core==1.3.2",
+    "hydra-joblib-launcher",
+    "loguru",
+    "meds_transforms==0.1.1",
+    "numpy",
+    "polars  >= 1.26.0, <= 1.27.9",
+    "pyarrow==20.0.0",
+    "safetensors==0.5.3",
+    # Required by the downstream probes (metrics + the balanced logistic head),
+    # not just the notebook/federated extras.
+    "scikit-learn",
+    "torch==2.7.1",
+    "tqdm",
+    "transformers==4.52.4",
+    "wandb",
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit<4"]
+tests = ["pytest"]
+jupyter = ["jupyter", "seaborn", "scikit-learn", "matplotlib", "pandas", "altair", "pylatex", "vl-convert-python"]
+federated = ["flwr>=1.13", "scikit-learn"]
+
+[project.scripts]
+# Preprocessing
+cocofl_tokenize = "cocofl.preprocess.run_tokenization:main"
+# Population backbone training
+cocofl_train = "cocofl.train.run_training:main"
+# Downstream task evaluation (population baseline)
+cocofl_infer = "cocofl.downstream.run_inference:main"
+cocofl_finetune = "cocofl.downstream.finetune:main"
+# Per-patient personalisation ablation (head-only / FFN / continual)
+cocofl_personalize = "cocofl.personalisation.run_ablation:main"
+# Flat federated baseline (FedAvg over hospital silos)
+cocofl_federated = "cocofl.federated.run_federated:main"
+# Hierarchical bidirectional (population <-> cohort <-> patient)
+cocofl_hierarchical = "cocofl.hierarchical.run_hierarchical:main"
+# Comprehensive evaluation harness (alpha sweep + all baselines)
+cocofl_evaluate = "cocofl.evaluation.run_evaluation:main"
+
+[tool.setuptools.package-data]
+cocofl = ["preprocess/maps/*.csv.gz"]
