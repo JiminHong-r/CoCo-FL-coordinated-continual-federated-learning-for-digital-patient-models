@@ -28,9 +28,7 @@ src/cocofl/
   evaluation/      evaluation harness, baselines, metrics, early stopping
   configs/         Hydra configs (training, tokenization, inference, dataset)
 scripts/           SLURM / shell launchers and analysis utilities
-tests/             pytest suite covering split binding, weighting, eval wiring
 docker/            CUDA 12.4 image used for cluster runs
-notebooks/         label dumps, baselines, figure generation
 ```
 
 ## Requirements
@@ -43,7 +41,7 @@ notebooks/         label dumps, baselines, figure generation
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[tests,federated,jupyter]"
+pip install -e ".[federated]"
 ```
 
 ## Data — read before running
@@ -97,12 +95,6 @@ prefer to invoke stages directly (`cocofl_tokenize`, `cocofl_train`,
 
 Scripts under `scripts/` carry SLURM headers for cluster submission; they can
 also be run as plain shell scripts from the project root.
-
-## Tests
-
-```bash
-pytest tests/
-```
 
 ## Note on artifacts
 

@@ -722,6 +722,19 @@ def main(cfg: DictConfig):
     # Unfreeze only the classifier head's intercepts, so a per-centre label shift
     # can be corrected where it should be instead of through the adapter.
     train_head_bias_only = bool(getattr(cfg, "train_head_bias_only", False))
+    # Train the FULL classifier head per centre, not just its intercepts.
+    #
+    # Motivated by a measurement, not a guess: the cross-centre transfer test
+    # (scripts/cross_centre_transfer.py) shows a per-centre LOGISTIC head — about
+    # 1,000 parameters on frozen features — beats a pooled head fitted on the same
+    # budget by +0.004 to +0.016 AUROC, while a 66,112-parameter cohort adapter
+    # feeding a FROZEN head recovers essentially none of it. That gap says the
+    # limitation is where the capacity sits, not how much there is. Letting the
+    # head move per centre tests exactly that.
+    #
+    # Off by default: it changes what a "cohort model" is, so any cell run with it
+    # is not comparable to the campaign's other cells.
+    train_head = bool(getattr(cfg, "train_head", False))
     # TD baselines list "local fine-tuning: per-centre AND per-patient fine-tuning
     # without coordination". The harness passed empty patient streams, making it a
     # one-level baseline with nothing for the hierarchical patient layer to be
@@ -761,6 +774,7 @@ def main(cfg: DictConfig):
             cl_strategy=cohort_cl_strategy, cl_alpha=cohort_cl_alpha,
             cl_temperature=cohort_cl_temperature,
             train_head_bias_only=train_head_bias_only,
+            train_head=train_head,
         ),
         patient_cfg=PatientConfig(
             bottleneck=patient_bottleneck, lr=patient_lr,
@@ -1364,9 +1378,17 @@ def main(cfg: DictConfig):
                 # bias-only arm ended up confounded with per-centre selection
                 # and unattributable. A row must describe its own configuration.
                 "cfg_train_head_bias_only": train_head_bias_only,
+                "cfg_train_head": train_head,
                 "cfg_per_hospital_selection": per_hospital_selection,
                 "cfg_split": getattr(cfg, "split_scheme", None),
-                "cfg_seed": getattr(cfg, "seed", None),
+                # Record the seeds that were USED, not the ones that were passed.
+                # `getattr(cfg, "seed", None)` wrote a blank whenever the runner
+                # omitted `+seed=`, even though the code had already defaulted to
+                # 42 and the cell was perfectly reproducible — so the CSV
+                # understated its own reproducibility. TD §3.10 requires seeds to
+                # be "set and recorded"; recording the resolved values is what
+                # makes the second half true.
+                "cfg_seed": seed,
                 "cfg_run_seed": run_seed,
                 "cfg_rounds": getattr(cfg, "rounds", None),
                 "cfg_cohort_local_steps": getattr(

@@ -14,6 +14,18 @@ wp3_artifacts/
 wp4_artifacts/
 results_for_presentation/
 *.log
+tests/
+notebooks/
+
+# --- Project working documents (local only) ----------------------------------
+# The task description asks that detailed project reports and presentations not
+# be disseminated (spec §3.11), so the write-up, the consolidated results and the
+# supervisor's task description stay out of the repository. They live on disk and
+# are shared directly, not through git.
+RESULTS.md
+REPORT_DRAFT.md
+CODE_AND_METHODS_GUIDE.md
+*.pdf
 
 # --- Python ------------------------------------------------------------------
 __pycache__/

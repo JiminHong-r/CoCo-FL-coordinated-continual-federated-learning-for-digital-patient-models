@@ -81,10 +81,13 @@ if [ "$sum_local" != "$sum_remote" ]; then
 fi
 echo "    match ($sum_local, $(printf '%s\n' "$sum_local" >/dev/null; cd "$LOCAL/src" && LC_ALL=C find . -name '*.py' -type f | wc -l | tr -d ' ') files)"
 
-# Which tree are the RUNNING cells importing? `v8_queue.sh` defaults CODE_SRC to
-# $PROJECT/src_v8, a second copy of the package — so a verified sync to src/ can
-# leave every live cell executing different code, silently. Syncing is not the
-# same as taking effect; say which tree is actually loaded.
+# Which tree are the RUNNING cells importing? This check is kept even though the
+# hazard it was written for is closed: the retired `v8_queue.sh` defaulted CODE_SRC
+# to $PROJECT/src_v8, a *second copy* of the package, so a verified sync to src/
+# could leave every live cell executing different code, silently. src_v8 is now a
+# symlink to src and that runner is gone, but syncing still is not the same as
+# taking effect — a cell that started before the sync keeps the code it imported.
+# So: say which tree is actually loaded, and by which pids.
 echo "==> code tree in use by running cells"
 ssh "$HOST" '
   running=0

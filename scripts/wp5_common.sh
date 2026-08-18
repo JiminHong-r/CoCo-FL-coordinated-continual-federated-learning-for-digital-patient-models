@@ -144,6 +144,12 @@ wp5_args () {
   [ -n "${RUN_SEED:-}" ] && WP5_COMMON+=(+run_seed=$RUN_SEED)
   [ -n "${PER_HOSPITAL_SELECTION:-}" ] && WP5_COMMON+=(+per_hospital_selection=$PER_HOSPITAL_SELECTION)
   [ -n "${HEAD_BIAS_ONLY:-}" ] && WP5_COMMON+=(+train_head_bias_only=$HEAD_BIAS_ONLY)
+  # TRAIN_HEAD=true : train the FULL classifier head per centre. The cross-centre
+  #   transfer test shows a ~1,000-parameter per-centre logistic head recovers
+  #   +0.004 to +0.016 AUROC that a 66,112-parameter adapter feeding a frozen head
+  #   does not. This tests whether the limitation is where the capacity sits.
+  #   Changes what a cohort model is, so it is not comparable to other cells.
+  [ -n "${TRAIN_HEAD:-}" ] && WP5_COMMON+=(+train_head=$TRAIN_HEAD)
   # LOCAL_FT_PATIENTS=true : make `local_finetune` the TD's actual baseline —
   #   per-centre AND per-patient fine-tuning, patients starting from the
   #   population model. Roughly triples that method's runtime and changes its
