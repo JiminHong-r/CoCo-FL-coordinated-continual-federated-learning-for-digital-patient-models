@@ -1,154 +1,164 @@
-"""Spec WP5 axis 2: subgroup analysis for personalisation gain.
+"""Spec WP5 axis 2: for which patient subgroups is personalisation beneficial?
 
-For each patient on which personalisation was run, look up demographics
-(age, gender, race, BMI quantile) from ``static_data.pickle`` and group the
-patient-level AUC + Δ_patient by subgroup.
+WHY THIS IS PER-PATIENT NOW
+---------------------------
+The earlier version aggregated at the hospital-cohort level and said so in its own
+docstring: the results CSV carries MACRO rows per (task, alpha, hospital), not per
+patient, so "which subgroups benefit" had to be approximated by "which centres,
+tagged by their dominant demographic, benefit". With three centres that is twelve
+rows, and it answers a different question from the one the spec asks.
 
-Inputs:
-  --csv : path to ``wp5_results.csv`` (must contain ``alpha`` and per-hospital
-          rows with ``auc_hierarchical_patient`` / ``auc_hierarchical_cohort``).
-  --static-pickle : ``static_data.pickle`` from the tokenized test dir.
-  --splits : ``data/federated_splits`` directory (for patient → hospital).
+``patient_records.csv`` now exists — one row per patient the patient layer ran on,
+carrying ``val_auroc_patient`` and ``val_auroc_cohort`` — so the axis can be
+answered directly: join each patient to their demographics and group.
 
-Outputs ``wp5_subgroup_analysis.md`` with per-subgroup Δ_patient stats.
+CHOOSING THE GROUPING VARIABLE
+------------------------------
+Age is the natural choice and is what the class-aware split partitions on. Across
+the whole cohort it is derivable for only ~69% of patients (100,613 of 328,164 have
+no usable birth anchor), which is why the earlier hospital-level version collapsed
+into an "unknown" bucket. That does not bite here: every patient the patient layer
+actually ran on has a derivable age, so coverage is 100% on the rows being grouped.
+Gender and race are coded for all patients. All three are reported with coverage
+stated, so it is visible which grouping a conclusion rests on.
 
-Note: the existing CSV reports MACRO per (task, α, hospital), not per-patient.
-This script therefore aggregates at the *hospital-cohort* level (one row per
-subgroup × hospital × α) — proxy for which centres/demographics benefit most
-from hierarchical personalisation.
+    python scripts/subgroup_analysis.py \
+        --records "results_v9_classaware_*/patient_records.csv" \
+        --static-pickle data/tokenized/mimic_train/static_data.pickle \
+        --out axis2_subgroups.md
 """
 from __future__ import annotations
 
 import argparse
-import json
+import glob
 import pickle
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-
-GENDER_LABELS = {0: "M", 1: "F"}
-RACE_LABELS = {0: "UNKNOWN", 1: "WHITE", 2: "BLACK", 3: "ASIAN",
-               4: "HISPANIC", 5: "OTHER"}
+MICROSEC_PER_YEAR = 31_557_600_000_000
 
 
-def static_lookups(static_data: dict) -> dict[int, dict]:
-    """Returns ``{pid: {age_bucket, gender, race, bmi_bucket}}``."""
-    out = {}
-    MICROSEC_PER_YEAR = 31_557_600_000_000
+def demographics(static_data: dict) -> pd.DataFrame:
+    """One row per patient: gender, race, and age bucket where derivable."""
+    rows = []
     for pid, data in static_data.items():
         gender_code = data.get("GENDER", {}).get("code", ["GENDER//F"])[0]
-        gender = "F" if "F" in gender_code else "M"
         race_code = data.get("RACE", {}).get("code", ["RACE//UNKNOWN"])[0]
-        race = race_code.split("//")[-1]
-        bmi_codes = data.get("BMI", {}).get("code", [])
-        bmi = bmi_codes[0].split("//")[-1] if bmi_codes else "UNKNOWN"
-        birth = data.get("MEDS_BIRTH", {}).get("time", [None])[0]
-        bmi_times = data.get("BMI", {}).get("time", [])
-        ref_time = bmi_times[0] if bmi_times else None
-        age = None
-        if birth and ref_time:
-            age_years = (ref_time - birth) / MICROSEC_PER_YEAR
-            if age_years < 30:
-                age = "<30"
-            elif age_years < 50:
-                age = "30-50"
-            elif age_years < 70:
-                age = "50-70"
-            else:
-                age = "70+"
-        out[int(pid)] = {"gender": gender, "race": race,
-                          "bmi_quantile": bmi, "age_bucket": age or "unknown"}
-    return out
+
+        birth_times = data.get("MEDS_BIRTH", {}).get("time") or [None]
+        birth = birth_times[0]
+        # Anchor on the earliest NON-birth event, as ``build_age_class_labels`` in
+        # build_split_v2.py does. Anchoring on a BMI timestamp drops every patient
+        # without a BMI record; including MEDS_BIRTH itself makes every age zero.
+        times = [t for k, v in data.items()
+                 if k != "MEDS_BIRTH" and isinstance(v, dict)
+                 for t in (v.get("time") or []) if t is not None]
+        age_bucket = "unknown"
+        if birth is not None and times:
+            yrs = (min(times) - birth) / MICROSEC_PER_YEAR
+            age_bucket = ("<30" if yrs < 30 else "30-50" if yrs < 50
+                          else "50-70" if yrs < 70 else "70+")
+        rows.append({
+            "patient_id": int(pid),
+            "gender": "F" if "F" in gender_code else "M",
+            "race": race_code.split("//")[-1],
+            "age_bucket": age_bucket,
+        })
+    return pd.DataFrame(rows)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", required=True, type=Path)
+    ap.add_argument("--records", required=True,
+                    help="glob for patient_records.csv files")
     ap.add_argument("--static-pickle", required=True, type=Path)
-    ap.add_argument("--splits", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
+    files = sorted(glob.glob(args.records))
+    if not files:
+        raise SystemExit(f"no patient_records.csv matched {args.records!r}")
+    rec = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+
     with open(args.static_pickle, "rb") as f:
-        static_data = pickle.load(f)
-    lookups = static_lookups(static_data)
+        demo = demographics(pickle.load(f))
 
-    df = pd.read_csv(args.csv)
-    per_hosp = df[df["hospital"] != "MACRO"].copy()
-    per_hosp["alpha"] = per_hosp["alpha"].astype(float)
+    df = rec.merge(demo, on="patient_id", how="left")
+    # The patient layer's own gain, on the slice acceptance is decided on.
+    df["delta"] = df["val_auroc_patient"] - df["val_auroc_cohort"]
+    ev = df[df["evaluable"].astype(bool)]
 
-    # Build hospital → dominant subgroup tags by loading each α split and
-    # counting the demographic mix of its patients (only the TRAIN partition
-    # is used for cohort training).
-    hospital_tags: list[dict] = []
-    for alpha in sorted(per_hosp["alpha"].unique()):
-        split_path = args.splits / f"alpha_{alpha}.json"
-        if not split_path.exists():
-            split_path = args.splits / f"alpha_{float(alpha)}.json"
-        if not split_path.exists():
+    lines = [
+        "# WP5 Axis 2 — Subgroup analysis (per patient)\n",
+        f"Source: {len(files)} cells, {len(df):,} patient records; "
+        f"{len(ev):,} evaluable, {int(df['accepted'].sum()):,} accepted.\n",
+        "`delta` is the patient adapter's validation AUROC minus the cohort "
+        "model's on the same slice — the quantity acceptance is decided on. It is "
+        "undefined where the slice is single-class, so only evaluable rows are "
+        "grouped.\n",
+    ]
+
+    for var in ("gender", "race", "age_bucket"):
+        known = df[var].notna() & (df[var] != "unknown") & (df[var] != "UNKNOWN")
+        lines.append(f"\n## By {var}  (coverage {100.0 * known.mean():.0f}%)\n")
+        if ev.empty:
+            lines.append("_no evaluable patients_\n")
             continue
-        split = json.loads(split_path.read_text())
-        for hid, parts in split["hospitals"].items():
-            pids = parts.get("train", [])
-            if not pids:
-                continue
-            subs = [lookups.get(pid, {}) for pid in pids]
-            gender_counts = pd.Series([s.get("gender") for s in subs]).value_counts(normalize=True)
-            race_counts = pd.Series([s.get("race") for s in subs]).value_counts(normalize=True)
-            age_counts = pd.Series([s.get("age_bucket") for s in subs]).value_counts(normalize=True)
-            hospital_tags.append({
-                "alpha": alpha, "hospital": int(hid),
-                "n_patients": len(pids),
-                "frac_F": float(gender_counts.get("F", 0)),
-                "frac_white": float(race_counts.get("WHITE", 0)),
-                "frac_black": float(race_counts.get("BLACK", 0)),
-                "frac_age_70plus": float(age_counts.get("70+", 0)),
-                "frac_age_50_70": float(age_counts.get("50-70", 0)),
-                "dominant_age": age_counts.idxmax() if not age_counts.empty else "unknown",
-            })
-    tags_df = pd.DataFrame(hospital_tags)
-    if tags_df.empty:
-        args.out.write_text("# Subgroup analysis\n\nNo hospital tags built (split files missing).")
-        print("No hospital tags produced.")
-        return
+        agg = ev.groupby(var).agg(
+            n=("patient_id", "size"),
+            accepted=("accepted", "sum"),
+            accept_rate=("accepted", "mean"),
+            mean_delta=("delta", "mean"),
+        ).round(3).sort_values("n", ascending=False)
+        lines.append(agg.reset_index().to_markdown(index=False))
 
-    # Merge with per-hospital AUC rows (only carry the rows we need)
-    keep = ["task", "alpha", "hospital",
-            "auc_hierarchical_cohort", "auc_hierarchical_patient",
-            "delta_cohort_hier", "delta_patient_hier"]
-    keep = [c for c in keep if c in per_hosp.columns]
-    perf = per_hosp[keep].copy()
-    perf["hospital"] = perf["hospital"].astype(int)
-    merged = perf.merge(tags_df, on=["alpha", "hospital"], how="left")
+    # ---- the "when" half of the axis ---------------------------------------
+    # The spec asks for "WHEN and for which patient subgroups personalisation is
+    # most beneficial". Demographics answer "for whom"; these answer "when" — the
+    # data conditions under which the patient layer pays, which is a different
+    # question and, for this result, the more informative one.
+    if not ev.empty:
+        lines.append("\n## When: by amount of fitting data (`n_fit` quartile)\n")
+        q = ev.copy()
+        q["n_fit_q"] = pd.qcut(q["n_fit"], 4, duplicates="drop")
+        agg = q.groupby("n_fit_q", observed=True).agg(
+            n=("patient_id", "size"),
+            accept_rate=("accepted", "mean"),
+            mean_delta=("delta", "mean"),
+        ).round(3)
+        lines.append(agg.reset_index().astype({"n_fit_q": str}).to_markdown(index=False))
 
-    lines = ["# WP5 Axis 2 — Subgroup Analysis\n",
-             f"Source: `{args.csv}`  ({len(merged)} per-hospital rows)\n",
-             "## Per-hospital demographic mix vs Δ_patient (hierarchical)\n",
-             ]
-    show = merged[["task", "alpha", "hospital", "n_patients",
-                   "frac_F", "frac_white", "frac_black",
-                   "dominant_age", "auc_hierarchical_cohort",
-                   "auc_hierarchical_patient", "delta_patient_hier"]].copy()
-    for c in ("frac_F", "frac_white", "frac_black",
-              "auc_hierarchical_cohort", "auc_hierarchical_patient",
-              "delta_patient_hier"):
-        if c in show.columns:
-            show[c] = show[c].apply(lambda v: round(float(v), 3) if pd.notna(v) else None)
-    lines.append(show.to_markdown(index=False))
-    lines.append("\n## Aggregated by dominant_age bucket (where Δ_patient is biggest)\n")
-    agg = merged.groupby("dominant_age").agg(
-        n=("hospital", "size"),
-        mean_cohort_auc=("auc_hierarchical_cohort", "mean"),
-        mean_patient_auc=("auc_hierarchical_patient", "mean"),
-        mean_delta_patient=("delta_patient_hier", "mean"),
-    ).round(3)
-    lines.append(agg.reset_index().to_markdown(index=False))
+        lines.append("\n## When: by evidence in the evaluation slice (`n_eval_pos`)\n")
+        q = ev.copy()
+        q["pos_band"] = pd.cut(q["n_eval_pos"], [-0.1, 0.5, 2.5, 10.5, 1e9],
+                               labels=["0", "1-2", "3-10", ">10"])
+        agg = q.groupby("pos_band", observed=True).agg(
+            n=("patient_id", "size"),
+            accept_rate=("accepted", "mean"),
+            mean_delta=("delta", "mean"),
+        ).round(3)
+        lines.append(agg.reset_index().astype({"pos_band": str}).to_markdown(index=False))
+
+        lines.append("\n## When: by heterogeneity level (alpha)\n")
+        agg = ev.groupby("alpha").agg(
+            n=("patient_id", "size"),
+            accept_rate=("accepted", "mean"),
+            mean_delta=("delta", "mean"),
+        ).round(3)
+        lines.append(agg.reset_index().to_markdown(index=False))
+
+        lines.append("\n## When: by task\n")
+        agg = ev.groupby("task").agg(
+            n=("patient_id", "size"),
+            accept_rate=("accepted", "mean"),
+            mean_delta=("delta", "mean"),
+        ).round(3)
+        lines.append(agg.reset_index().to_markdown(index=False))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n".join(lines))
-    print(f"Wrote {args.out}")
+    print(f"Wrote {args.out}  ({len(df):,} records, {len(ev):,} evaluable)")
 
 
 if __name__ == "__main__":

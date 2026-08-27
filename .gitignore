@@ -45,3 +45,5 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+SUPERVISOR_SUMMARY.md
+WP5_RESULTS.md

@@ -1,6 +1,6 @@
 """Load pre-computed federated splits (Spec WP2 task 4).
 
-Pairs with ``scripts/create_federated_splits.py`` which writes one JSON file
+Pairs with ``scripts/build_split_v2.py`` which writes one JSON file
 per α value:
 
     {

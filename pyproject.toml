@@ -38,7 +38,12 @@ dependencies = [
 dev = ["pre-commit<4"]
 tests = ["pytest"]
 jupyter = ["jupyter", "seaborn", "scikit-learn", "matplotlib", "pandas", "altair", "pylatex", "vl-convert-python"]
-federated = ["flwr>=1.13", "scikit-learn"]
+# Pinned, not floating: TD 3.10 requires fixed dependency versions. flwr is
+# pipeline infrastructure (the federated runtime), not a dev convenience, so a
+# version drift would change how every reported cell was produced. Installing
+# it also downgrades protobuf 7.x -> 6.x; recorded here because the environment
+# must be reproducible from this file alone.
+federated = ["flwr==1.33.0", "protobuf==6.33.6", "scikit-learn"]
 
 [project.scripts]
 # Preprocessing

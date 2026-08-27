@@ -140,8 +140,13 @@ wp5_args () {
   #            measure run-to-run variance on the SAME partition.
   # Before this existed the global RNG was unseeded, so no cell was reproducible
   # and a same-config replicate could select a different round purely by chance.
-  [ -n "${SEED:-}" ] && WP5_COMMON+=(+seed=$SEED)
-  [ -n "${RUN_SEED:-}" ] && WP5_COMMON+=(+run_seed=$RUN_SEED)
+  # ++ not +: `seed` already exists in the base config, and a single + means
+  # "append a NEW key", which Hydra rejects with "An item is already at 'seed'".
+  # That is why no cell has ever been launched with an explicit seed — the knob
+  # was unusable, and every run silently took the code default of 42 instead.
+  # `++` adds or overrides, so the value passed here is the value used.
+  [ -n "${SEED:-}" ] && WP5_COMMON+=(++seed=$SEED)
+  [ -n "${RUN_SEED:-}" ] && WP5_COMMON+=(++run_seed=$RUN_SEED)
   [ -n "${PER_HOSPITAL_SELECTION:-}" ] && WP5_COMMON+=(+per_hospital_selection=$PER_HOSPITAL_SELECTION)
   [ -n "${HEAD_BIAS_ONLY:-}" ] && WP5_COMMON+=(+train_head_bias_only=$HEAD_BIAS_ONLY)
   # TRAIN_HEAD=true : train the FULL classifier head per centre. The cross-centre
@@ -150,6 +155,11 @@ wp5_args () {
   #   does not. This tests whether the limitation is where the capacity sits.
   #   Changes what a cohort model is, so it is not comparable to other cells.
   [ -n "${TRAIN_HEAD:-}" ] && WP5_COMMON+=(+train_head=$TRAIN_HEAD)
+  # USE_FLOWER=true : run the federated steps through Flower's client/server
+  #   components rather than the in-process loop. Same arithmetic, different
+  #   execution order, so results agree within +/-0.0008 rather than exactly —
+  #   do not mix flower and non-flower cells inside one reported grid.
+  [ -n "${USE_FLOWER:-}" ] && WP5_COMMON+=(+use_flower=$USE_FLOWER)
   # LOCAL_FT_PATIENTS=true : make `local_finetune` the TD's actual baseline —
   #   per-centre AND per-patient fine-tuning, patients starting from the
   #   population model. Roughly triples that method's runtime and changes its

@@ -3,7 +3,7 @@
 #
 #   bash scripts/v9_queue2.sh <gpu> <wait_pid> <tag:split:task:alpha[:VAR=val,...]> ...
 #
-# WHY THIS EXISTS (over v9_disentangle.sh)
+# WHY THIS EXISTS
 # ---------------------------------------
 # The GPU is shared. `class-aware readmission α=10.0` ran for four hours and died
 # with a CUDA OOM when another user's job expanded onto the card — and because the

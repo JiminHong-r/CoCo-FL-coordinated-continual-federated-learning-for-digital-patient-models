@@ -64,7 +64,7 @@ def verdict(cell: str, metric: str, n: int) -> dict | None:
 
 
 def short(cell: str) -> str:
-    return (cell.replace("results_v9", "")
+    return (cell.replace("results_v10flw", "").replace("results_v9", "")
                 .replace("_classaware_", " CA ")
                 .replace("_random_", " RD ")
                 .replace("hospital_mortality", "mort")
@@ -75,9 +75,15 @@ def short(cell: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=300)
+    # Which campaign to summarise. Hardcoding a prefix meant this script could
+    # only ever describe the run it was written for; the reported grid has since
+    # moved to the Flower campaign, and a second hardcoded pattern would leave the
+    # same trap for the next one.
+    ap.add_argument("--glob", default="results_v10flw*",
+                    help="cell-directory glob (default: the reported Flower grid)")
     args = ap.parse_args()
 
-    cells = sorted(c for c in glob.glob("results_v9*")
+    cells = sorted(c for c in glob.glob(args.glob)
                    if os.path.isdir(c) and glob.glob(os.path.join(c, "predictions_*.npz")))
     if not cells:
         sys.exit("no paired-testable cells found")

@@ -91,6 +91,14 @@ class CoordinatorConfig:
     # patients always initialise from the cohort state, so setting eta_cohort=0
     # on the local baseline would make it identical to top_down_only.
     patient_init_from_population: bool = False
+    # Route steps 1-3 through Flower clients and step 4 through a Flower
+    # strategy instead of the in-process loop. The arithmetic is identical
+    # (tests/test_flower_equivalence.py); what changes is EXECUTION ORDER, since
+    # a Flower client completes all of its own work inside fit() whereas the
+    # in-process path runs every centre's cohort step before any patient step.
+    # That reorders consumption of torch's global RNG, so cells agree within the
+    # documented tolerance rather than bit-exactly.
+    use_flower: bool = False
 
 
 class HierarchicalCoordinator:
@@ -142,6 +150,13 @@ class HierarchicalCoordinator:
         # round (see run_round) so evaluation never sees a refreshed state for the
         # round that was just trained.
         self._refresh_pending = False
+        # Flower-path state: per-round log fragments and pre-patient snapshots the
+        # clients fill in, plus lazily built clients/strategy.
+        self._flower_logs: dict = {}
+        self._flower_pre_patient: dict = {}
+        self._flower_refresh_pending = False
+        self._flower_clients = None
+        self._flower_strategy = None
 
         # Replay buffer for "replay" CL strategy: pre-populated from the
         # cohort training loaders (proxy for population/historic data).
@@ -183,12 +198,28 @@ class HierarchicalCoordinator:
         if beta <= 0.0:
             return
         for hid in self.cohort_states:
-            for k in self.cohort_states[hid]:
-                if k in self.population_adapter_state:
-                    self.cohort_states[hid][k] = (
-                        (1.0 - beta) * self.cohort_states[hid][k]
-                        + beta * self.population_adapter_state[k]
-                    )
+            self._refresh_one_cohort(hid, self.population_adapter_state, beta)
+
+    def _refresh_one_cohort(self, hid, population_state, beta=None) -> None:
+        """Blend the population adapter into ONE centre's cohort state.
+
+        Split out from ``_refresh_cohort_from_population`` because under Flower
+        this is the client's job: the server broadcasts the population adapter and
+        each centre blends it into its own state on receipt. Same arithmetic,
+        performed where it would actually happen in a deployment.
+        """
+        if not population_state:
+            return
+        if beta is None:
+            beta = self.cfg.refresh_blend
+        if beta <= 0.0:
+            return
+        for k in self.cohort_states[hid]:
+            if k in population_state:
+                self.cohort_states[hid][k] = (
+                    (1.0 - beta) * self.cohort_states[hid][k]
+                    + beta * population_state[k]
+                )
 
     @staticmethod
     def _latest_time_in(loader) -> int | None:
@@ -230,6 +261,104 @@ class HierarchicalCoordinator:
         start = ((self.round_idx - 1) * n_per_round) % n
         return [patient_streams[(start + k) % n] for k in range(n_per_round)]
 
+    def _cohort_step(self, hid) -> dict:
+        """Cohort-level training for ONE centre (round step 1).
+
+        Extracted from ``run_round`` so the single-process path and the Flower
+        client execute the SAME code rather than two copies. Re-implementing a
+        per-centre step inside the client is exactly how the "two independent
+        copies drifted apart" defect arose once already, so the client calls this.
+        """
+        loader = self.hospital_train_loaders[hid]
+        tmpl = copy.deepcopy(self.population_clf)
+        attach_ffn_adapter(tmpl.backbone, bottleneck=self.cfg.cohort_cfg.bottleneck,
+                           attr="cohort_adapter")
+        # Load current cohort state into the fresh template
+        load_level_state_dict(tmpl, self.cohort_states[hid], attr="cohort_adapter")
+        # Train one local round on top of current state
+        for p in tmpl.backbone.cohort_adapter.parameters():
+            p.requires_grad_(True)
+        for p in tmpl.classifier.parameters():
+            p.requires_grad_(self.cfg.cohort_cfg.train_head)
+        if (self.cfg.cohort_cfg.train_head_bias_only
+                and not self.cfg.cohort_cfg.train_head):
+            # Intercepts only — see CohortConfig.train_head_bias_only.
+            from ..adapters.ffn import head_bias_parameters
+            for _n, p in head_bias_parameters(tmpl):
+                p.requires_grad_(True)
+        # When ``cohort_cfg.cl_strategy == "distill"`` the frozen population
+        # classifier is the teacher, so the cohort adapter does not drift too far
+        # from population knowledge (Spec WP4 task 4).
+        from .cohort import _train_one_cohort_step
+        teacher = self.population_clf if self.cfg.cohort_cfg.cl_strategy == "distill" else None
+        n_seen, avg_loss = _train_one_cohort_step(
+            tmpl, loader, self.label_fn, self.cfg.cohort_cfg, self.device,
+            teacher=teacher, replay_buffer=self.replay_buffer,
+        )
+        self.cohort_states[hid] = level_state_dict(
+            tmpl, attr="cohort_adapter",
+            include_head=self.cfg.cohort_cfg.train_head,
+            head_bias_only=self.cfg.cohort_cfg.train_head_bias_only)
+        del tmpl
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {f"cohort_{hid}_loss": avg_loss, f"cohort_{hid}_n_seen": n_seen}
+
+    def _patient_step(self, hid, pre_state: dict) -> dict:
+        """Patient training + patient->cohort propagation for ONE centre (steps 2-3).
+
+        ``pre_state`` is this centre's cohort state as it stood after the cohort
+        step and before any patient feedback — the reference the delta norm is
+        measured against (Spec WP5 axis 4).
+        """
+        patient_streams = self.hospital_patient_streams[hid]
+        cohort_state = self.cohort_states[hid]
+        log: dict = {}
+        deltas, counts, losses, times = [], [], [], []
+        for (_pid, p_train_loader, _p_val_loader, _p_eval_loader) in self._patients_this_round(patient_streams):
+            _patient_base = (self._initial_cohort_states[hid]
+                             if self.cfg.patient_init_from_population
+                             else cohort_state)
+            _, _, delta, p_loss = train_patient_adapter(
+                self.population_clf, _patient_base, p_train_loader, self.label_fn,
+                self.cfg.patient_cfg, self.device,
+                cohort_bottleneck=self.cfg.cohort_cfg.bottleneck,
+                replay_buffer=self.replay_buffer,
+            )
+            deltas.append(delta)
+            counts.append(len(p_train_loader.dataset))
+            # Real per-patient task loss; ``uncertainty`` weighting takes 1/loss.
+            losses.append(p_loss)
+            # Data recency for this patient (Spec WP4 task 3 "update recency").
+            times.append(self._latest_time_in(p_train_loader))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        # Newest data this centre contributed, for cohort->population recency.
+        _cohort_times = [t for t in times if t is not None]
+        log[f"cohort_{hid}_latest_time"] = (
+            max(_cohort_times) if _cohort_times
+            else self._latest_time_in(self.hospital_train_loaders.get(hid))
+        )
+        if deltas:
+            self.cohort_states[hid] = propagate_patients_to_cohort(
+                cohort_state, deltas, counts,
+                eta_cohort=self.cfg.eta_cohort,
+                scheme=(self.cfg.patient_weighting_scheme
+                        or self.cfg.weighting_scheme),
+                losses=losses,
+                times=times,
+                half_life_days=self.cfg.recency_half_life_days,
+            )
+        self.patients_since_sync += len(deltas)
+        log[f"cohort_{hid}_n_patients"] = len(deltas)
+        # L2 norm of the cohort delta from patient feedback.
+        delta_norm = 0.0
+        for k, v_new in self.cohort_states[hid].items():
+            if k in pre_state:
+                delta_norm += float((v_new - pre_state[k]).pow(2).sum())
+        log[f"cohort_{hid}_patient_delta_norm"] = delta_norm ** 0.5
+        return log
+
     def run_round(self) -> dict:
         """One super-round: cohort -> patients -> upward -> (maybe) population update."""
         self.round_idx += 1
@@ -243,44 +372,15 @@ class HierarchicalCoordinator:
             self._refresh_pending = False
             round_log["refreshed_from_population"] = True
 
-        # --- Step 1: cohort-level training (per centre) ---
-        for hid, loader in self.hospital_train_loaders.items():
-            tmpl = copy.deepcopy(self.population_clf)
-            attach_ffn_adapter(tmpl.backbone, bottleneck=self.cfg.cohort_cfg.bottleneck,
-                               attr="cohort_adapter")
-            # Load current cohort state into the fresh template
-            load_level_state_dict(tmpl, self.cohort_states[hid], attr="cohort_adapter")
-            # Train one local round on top of current state
-            for p in tmpl.backbone.cohort_adapter.parameters():
-                p.requires_grad_(True)
-            for p in tmpl.classifier.parameters():
-                p.requires_grad_(self.cfg.cohort_cfg.train_head)
-            if (self.cfg.cohort_cfg.train_head_bias_only
-                    and not self.cfg.cohort_cfg.train_head):
-                # Intercepts only — see CohortConfig.train_head_bias_only.
-                from ..adapters.ffn import head_bias_parameters
-                for _n, p in head_bias_parameters(tmpl):
-                    p.requires_grad_(True)
-            # Train: simple inline loop calling cohort training step.
-            # When ``cohort_cfg.cl_strategy == "distill"`` the frozen population
-            # classifier is used as the teacher so the cohort adapter does not
-            # drift too far from population knowledge (Spec WP4 task 4).
-            from .cohort import _train_one_cohort_step
-            teacher = self.population_clf if self.cfg.cohort_cfg.cl_strategy == "distill" else None
-            n_seen, avg_loss = _train_one_cohort_step(
-                tmpl, loader, self.label_fn, self.cfg.cohort_cfg, self.device,
-                teacher=teacher, replay_buffer=self.replay_buffer,
-            )
-            self.cohort_states[hid] = level_state_dict(
-                tmpl, attr="cohort_adapter",
-                include_head=self.cfg.cohort_cfg.train_head,
-                head_bias_only=self.cfg.cohort_cfg.train_head_bias_only)
-            round_log[f"cohort_{hid}_loss"] = avg_loss
-            round_log[f"cohort_{hid}_n_seen"] = n_seen
-            del tmpl
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        # --- Steps 1-3: per-centre work, in-process or through Flower ---
+        if self.cfg.use_flower:
+            cohort_pre_patient = self._flower_centre_rounds(round_log)
+            round_log["cohort_state_pre_patient"] = cohort_pre_patient
+            return self._finish_round(round_log)
 
+        # --- Step 1: cohort-level training (per centre) ---
+        for hid in self.hospital_train_loaders:
+            round_log.update(self._cohort_step(hid))
         # Spec WP5 axis 4: record cohort-state SNAPSHOT before patient aggregation
         # so the harness can attribute later cohort improvement to patient
         # feedback (vs the cohort-only training step that came before).
@@ -291,56 +391,97 @@ class HierarchicalCoordinator:
         round_log["cohort_state_pre_patient"] = cohort_pre_patient
 
         # --- Step 2 + 3: patient training + upward propagation per cohort ---
-        for hid, patient_streams in self.hospital_patient_streams.items():
-            cohort_state = self.cohort_states[hid]
-            deltas, counts, losses, times = [], [], [], []
-            for (_pid, p_train_loader, _p_val_loader, _p_eval_loader) in self._patients_this_round(patient_streams):
-                _patient_base = (self._initial_cohort_states[hid]
-                                 if self.cfg.patient_init_from_population
-                                 else cohort_state)
-                _, _, delta, p_loss = train_patient_adapter(
-                    self.population_clf, _patient_base, p_train_loader, self.label_fn,
-                    self.cfg.patient_cfg, self.device,
-                    cohort_bottleneck=self.cfg.cohort_cfg.bottleneck,
-                    replay_buffer=self.replay_buffer,
-                )
-                deltas.append(delta)
-                counts.append(len(p_train_loader.dataset))
-                # Real per-patient task loss. ``weighting_scheme="uncertainty"``
-                # takes 1/loss, so a patient the adapter fits well contributes
-                # more to the cohort. This was a hardcoded 1.0, which made every
-                # inverse-loss weight identical — "uncertainty" was "uniform".
-                losses.append(p_loss)
-                # Data recency for this patient (Spec WP4 task 3 "update recency").
-                times.append(self._latest_time_in(p_train_loader))
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            # Newest data this centre contributed, for cohort->population recency.
-            _cohort_times = [t for t in times if t is not None]
-            round_log[f"cohort_{hid}_latest_time"] = (
-                max(_cohort_times) if _cohort_times
-                else self._latest_time_in(self.hospital_train_loaders.get(hid))
-            )
-            if deltas:
-                self.cohort_states[hid] = propagate_patients_to_cohort(
-                    cohort_state, deltas, counts,
-                    eta_cohort=self.cfg.eta_cohort,
-                    scheme=(self.cfg.patient_weighting_scheme
-                            or self.cfg.weighting_scheme),
-                    losses=losses,
-                    times=times,
-                    half_life_days=self.cfg.recency_half_life_days,
-                )
-            self.patients_since_sync += len(deltas)
-            round_log[f"cohort_{hid}_n_patients"] = len(deltas)
-            # L2 norm of the cohort delta from patient feedback — proxy for
-            # how much patients changed the cohort this round.
-            delta_norm = 0.0
-            for k, v_new in self.cohort_states[hid].items():
-                if k in cohort_pre_patient[hid]:
-                    delta_norm += float((v_new - cohort_pre_patient[hid][k]).pow(2).sum())
-            round_log[f"cohort_{hid}_patient_delta_norm"] = delta_norm ** 0.5
+        for hid in self.hospital_patient_streams:
+            round_log.update(self._patient_step(hid, cohort_pre_patient[hid]))
 
+        return self._finish_round(round_log)
+
+    # ------------------------------------------------------------------ Flower
+    def _flower_centre_rounds(self, round_log: dict) -> dict:
+        """Steps 1-3 for every centre, executed as Flower clients.
+
+        Each client completes its OWN cohort step and patient loop inside
+        ``fit()`` — which is what a real federated client does, and why execution
+        order differs from the in-process path. The clients call the very same
+        ``_cohort_step`` / ``_patient_step`` used above rather than reimplementing
+        them, so the two paths cannot drift apart.
+        """
+        from ..federated.flower_app import (
+            make_hierarchical_client_class, state_to_ndarrays,
+        )
+        if getattr(self, "_flower_clients", None) is None:
+            Client = make_hierarchical_client_class()
+            self._flower_clients = {
+                hid: Client(self, hid) for hid in self.hospital_train_loaders
+            }
+        # The server broadcasts the population adapter; each client blends it in
+        # on receipt when a refresh is pending (the hierarchy's downward flow).
+        pop = self.population_adapter_state or {}
+        params = state_to_ndarrays(pop) if pop else []
+        refresh = bool(getattr(self, "_flower_refresh_pending", False))
+        self._flower_refresh_pending = False
+        self._flower_pre_patient = {}
+        for hid, client in self._flower_clients.items():
+            _arrays, _n, _metrics = client.fit(
+                params, {"refresh": refresh, "round": self.round_idx})
+            round_log.update(self._flower_logs.pop(hid, {}))
+        return self._flower_pre_patient
+
+    def _flower_aggregate(self, cohort_states, cohort_counts,
+                          cohort_losses, cohort_times):
+        """Step 4 through Flower's strategy rather than a direct call.
+
+        ``HierarchicalEMAStrategy`` subclasses ``flwr.server.strategy.FedAvg`` and
+        replaces its average with the cohort->population EMA blend, because stock
+        FedAvg cannot express it (with eta=0.3 onto a zero cohort it returns 0.5
+        where the blend returns 0.3). Verified in test_flower_equivalence.py.
+        """
+        from ..federated.flower_app import (
+            make_hierarchical_strategy, state_to_ndarrays, ndarrays_to_state,
+        )
+        from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
+
+        reference = cohort_states[0]
+        if getattr(self, "_flower_strategy", None) is None:
+            Strategy = make_hierarchical_strategy()
+            self._flower_strategy = Strategy(
+                reference_state=reference,
+                eta_population=self.cfg.eta_population,
+                scheme=(self.cfg.cohort_weighting_scheme
+                        or self.cfg.weighting_scheme),
+            )
+            self._flower_strategy._current = (
+                {k: v.clone() for k, v in self.population_adapter_state.items()}
+                if self.population_adapter_state else
+                {k: torch.zeros_like(v) for k, v in reference.items()}
+            )
+        strat = self._flower_strategy
+        # Say it out loud. Three separate "green" bring-up runs tonight executed
+        # less than they appeared to (a dropped flag, a stale file, and a trigger
+        # that never fired), each reporting CELL OK. The cohort->population step
+        # is the upward half of this project's central claim, so a run must state
+        # in its log that it happened and by which route — not leave it to be
+        # inferred from the absence of a crash.
+        print(f"    cohort->population via FLOWER strategy "
+              f"(HierarchicalEMAStrategy, eta_population={self.cfg.eta_population}, "
+              f"scheme={self.cfg.cohort_weighting_scheme or self.cfg.weighting_scheme}, "
+              f"round={self.round_idx}, n_cohorts={len(cohort_states)})")
+        strat.round_losses = cohort_losses
+        strat.round_times = cohort_times
+        strat.half_life_days = self.cfg.recency_half_life_days
+
+        class _Res:
+            def __init__(self, state, n):
+                self.parameters = ndarrays_to_parameters(state_to_ndarrays(state))
+                self.num_examples = int(n)
+                self.metrics = {}
+
+        results = [(None, _Res(s, n)) for s, n in zip(cohort_states, cohort_counts)]
+        params, _ = strat.aggregate_fit(self.round_idx, results, [])
+        return ndarrays_to_state(parameters_to_ndarrays(params), reference)
+
+    def _finish_round(self, round_log: dict) -> dict:
+        """Step 4 onward — shared by the in-process and Flower paths."""
         # --- Step 4: cohort -> population (slow) ---
         # --- Step 4 trigger (Spec WP4 task 5): round frequency, OR "after N
         # patient updates", OR divergence. The first condition met wins.
@@ -400,15 +541,22 @@ class HierarchicalCoordinator:
             # decays. Falls back to None (and a warning) if unavailable.
             cohort_times = [round_log.get(f"cohort_{h}_latest_time")
                             for h in self.cohort_states]
-            self.population_adapter_state = propagate_cohorts_to_population(
-                self.population_adapter_state, cohort_states, cohort_counts,
-                eta_population=self.cfg.eta_population,
-                scheme=(self.cfg.cohort_weighting_scheme
-                        or self.cfg.weighting_scheme),
-                losses=cohort_losses,
-                times=cohort_times,
-                half_life_days=self.cfg.recency_half_life_days,
-            )
+            if self.cfg.use_flower:
+                self.population_adapter_state = self._flower_aggregate(
+                    cohort_states, cohort_counts, cohort_losses, cohort_times)
+            else:
+                print(f"    cohort->population via in-process propagation "
+                      f"(eta_population={self.cfg.eta_population}, "
+                      f"round={self.round_idx}, n_cohorts={len(cohort_states)})")
+                self.population_adapter_state = propagate_cohorts_to_population(
+                    self.population_adapter_state, cohort_states, cohort_counts,
+                    eta_population=self.cfg.eta_population,
+                    scheme=(self.cfg.cohort_weighting_scheme
+                            or self.cfg.weighting_scheme),
+                    losses=cohort_losses,
+                    times=cohort_times,
+                    half_life_days=self.cfg.recency_half_life_days,
+                )
             round_log["population_updated"] = True
             fired = [name for name, on in (("frequency", freq_trigger),
                                             ("n_patients", n_patient_trigger),
@@ -435,7 +583,11 @@ class HierarchicalCoordinator:
             # `hierarchical` selecting round 1 in every completed cell, while
             # fedavg selected round 5, is what that looks like from the outside.
             if self.cfg.refresh_cohort_from_population:
-                self._refresh_pending = True
+                if self.cfg.use_flower:
+                    # Applied by each client on receipt of the broadcast, next round.
+                    self._flower_refresh_pending = True
+                else:
+                    self._refresh_pending = True
 
         self.history.append(round_log)
         return round_log

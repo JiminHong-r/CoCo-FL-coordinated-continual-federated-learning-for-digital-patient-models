@@ -624,6 +624,17 @@ def main(cfg: DictConfig):
     # patient partitions (train / val / test per hospital, per α) from JSON
     # files; otherwise it falls back to an inline Dirichlet draw.
     splits_dir = getattr(cfg, "splits_dir", None)
+    # Which partitioning regime produced this row. `split_scheme` is set by no
+    # runner — the split arrives as `+splits_dir=<abs path>` — so `cfg_split` was
+    # blank in every results file ever written, the same failure as `cfg_seed`
+    # before D32: the column exists, nothing fills it. Derive the label from the
+    # path actually used and keep the raw directory beside it, so a row states
+    # its own data split (TD 3.10: "the training configuration is stored
+    # alongside results ... data splits").
+    _sd = str(splits_dir) if splits_dir else ""
+    split_label = (getattr(cfg, "split_scheme", None)
+                   or ("classaware" if "classaware" in _sd
+                       else "random" if _sd else None))
 
     Vocabulary.from_path(test_dir)
     with open(test_dir / STATIC_DATA_FN, "rb") as f:
@@ -735,6 +746,32 @@ def main(cfg: DictConfig):
     # Off by default: it changes what a "cohort model" is, so any cell run with it
     # is not comparable to the campaign's other cells.
     train_head = bool(getattr(cfg, "train_head", False))
+    # Flower as the federated runtime (TD 3.5.1 deviation, approved 2026-08-18).
+    #
+    # FAIL LOUDLY, DO NOT FALL BACK. Every knob here is a ``getattr`` with a
+    # default, so a config that never arrives is indistinguishable from one
+    # deliberately left off — which is how a cell can run the in-process path
+    # while its operator believes it is running Flower. That happened twice
+    # during bring-up: once because the env->Hydra plumbing was undeployed, once
+    # because this file was stale while the coordinator was current. Both looked
+    # like a clean pass. So: state the runtime in the log, and if Flower is asked
+    # for and cannot be provided, raise rather than quietly degrade.
+    use_flower = bool(getattr(cfg, "use_flower", False))
+    if use_flower:
+        try:
+            import flwr as _flwr
+        except ImportError as exc:  # pragma: no cover - environment guard
+            raise RuntimeError(
+                "use_flower=true but flwr is not importable. Refusing to fall "
+                "back to the in-process path: the run would silently produce a "
+                "result attributed to the wrong pipeline. Install the extra "
+                "(pip install -e '.[federated]') or unset USE_FLOWER."
+            ) from exc
+        print(f"  federated runtime: FLOWER {_flwr.__version__} "
+              f"(client/server; cohort<->population crosses the boundary, "
+              f"patient level is local by construction)")
+    else:
+        print("  federated runtime: in-process simulation (single process)")
     # TD baselines list "local fine-tuning: per-centre AND per-patient fine-tuning
     # without coordination". The harness passed empty patient streams, making it a
     # one-level baseline with nothing for the hierarchical patient layer to be
@@ -795,6 +832,17 @@ def main(cfg: DictConfig):
         # overwriting (refresh_blend=1.0 = legacy overwrite). Default 0.3.
         refresh_blend=float(getattr(cfg, "refresh_blend", 0.3)),
         patient_rotation=bool(getattr(cfg, "patient_rotation", False)),
+        # Route the federated steps through Flower's client/server components
+        # instead of the in-process loop. The arithmetic is identical (16 tests in
+        # tests/test_flower_equivalence.py); execution ORDER differs, because a
+        # Flower client completes its own cohort AND patient work inside fit()
+        # while the in-process path runs every centre's cohort step first. That
+        # reorders torch's global RNG stream, so a Flower cell agrees with its
+        # in-process counterpart within the +/-0.0008 tolerance of section 3.10
+        # rather than bit-exactly. Cells run under different values of this flag
+        # are therefore comparable but not identical, and should not be mixed
+        # within one reported grid.
+        use_flower=use_flower,
     )
     def _cap_str(n):
         return "ALL" if not n else str(n)
@@ -1379,8 +1427,10 @@ def main(cfg: DictConfig):
                 # and unattributable. A row must describe its own configuration.
                 "cfg_train_head_bias_only": train_head_bias_only,
                 "cfg_train_head": train_head,
+                "cfg_use_flower": use_flower,
                 "cfg_per_hospital_selection": per_hospital_selection,
-                "cfg_split": getattr(cfg, "split_scheme", None),
+                "cfg_split": split_label,
+                "cfg_splits_dir": _sd or None,
                 # Record the seeds that were USED, not the ones that were passed.
                 # `getattr(cfg, "seed", None)` wrote a blank whenever the runner
                 # omitted `+seed=`, even though the code had already defaulted to

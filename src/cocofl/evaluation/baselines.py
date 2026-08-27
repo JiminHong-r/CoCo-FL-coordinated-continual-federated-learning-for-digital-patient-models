@@ -565,28 +565,54 @@ def run_standard_fedavg(
     ).values()])
     val0_fed = best_val
     best_round = 0
+    def _local_step(hid, state):
+        """This centre's local training for one round: state -> (state, n_seen).
+
+        Defined once and used by BOTH runtimes. The in-process loop calls it
+        directly; the Flower client calls it through ``fit``. Keeping a single
+        definition is what makes "the runtime does not change the result" a
+        property of the code rather than a claim about two similar loops.
+        """
+        loader = hospital_train_loaders[hid]
+        clf = copy.deepcopy(template)
+        load_level_state_dict(clf, state, attr="cohort_adapter")
+        for p in clf.backbone.cohort_adapter.parameters():
+            p.requires_grad_(True)
+        for p in clf.classifier.parameters():
+            p.requires_grad_(coord_cfg.cohort_cfg.train_head)
+        n_seen, _ = _train_one_cohort_step(
+            clf, loader, label_fn, coord_cfg.cohort_cfg, device,
+            teacher=teacher, replay_buffer=replay_buffer,
+        )
+        out = level_state_dict(
+            clf, attr="cohort_adapter",
+            include_head=coord_cfg.cohort_cfg.train_head)
+        del clf
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return out, n_seen
+
+    # standard_fedavg is the ONLY other method that crosses a centre boundary,
+    # so it must use the same runtime as the hierarchy — the two are compared
+    # directly in the results table, and a comparison whose arms were produced by
+    # different execution paths is not defensible.
+    use_flower = bool(getattr(coord_cfg, "use_flower", False))
     for r in range(1, max_rounds + 1):
-        local_states: list[dict[str, torch.Tensor]] = []
-        local_counts: list[float] = []
-        for hid, loader in hospital_train_loaders.items():
-            clf = copy.deepcopy(template)
-            load_level_state_dict(clf, server_state, attr="cohort_adapter")
-            for p in clf.backbone.cohort_adapter.parameters():
-                p.requires_grad_(True)
-            for p in clf.classifier.parameters():
-                p.requires_grad_(coord_cfg.cohort_cfg.train_head)
-            n_seen, _ = _train_one_cohort_step(
-                clf, loader, label_fn, coord_cfg.cohort_cfg, device,
-                teacher=teacher, replay_buffer=replay_buffer,
+        if use_flower:
+            from ..federated.flower_app import flower_fedavg_round
+            server_state, _counts = flower_fedavg_round(
+                server_state,
+                {hid: (lambda st, h=hid: _local_step(h, st))
+                 for hid in hospital_train_loaders},
             )
-            local_states.append(level_state_dict(
-                clf, attr="cohort_adapter",
-                include_head=coord_cfg.cohort_cfg.train_head))
-            local_counts.append(float(max(n_seen, 1)))
-            del clf
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        server_state = weighted_state_average(local_states, local_counts)
+        else:
+            local_states: list[dict[str, torch.Tensor]] = []
+            local_counts: list[float] = []
+            for hid in hospital_train_loaders:
+                st, n_seen = _local_step(hid, server_state)
+                local_states.append(st)
+                local_counts.append(float(max(n_seen, 1)))
+            server_state = weighted_state_average(local_states, local_counts)
         broadcast_states = {hid: server_state for hid in hospital_train_loaders}
         val_per_hosp = _eval_full_per_hospital(
             template, broadcast_states, hospital_val_loaders,

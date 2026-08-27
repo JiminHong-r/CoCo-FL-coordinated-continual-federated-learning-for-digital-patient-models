@@ -80,12 +80,10 @@ scripts/run_training.sh
 # 3. downstream evaluation of the population model
 scripts/run_inference.sh
 
-# 4. per-patient personalisation ablation (WP3)
-scripts/run_ablation.sh
-
-# 5. federated + hierarchical runs (WP4 / WP5)
-scripts/run_wp4_ablations.sh
-scripts/run_wp5_classaware.sh
+# 4. federated + hierarchical evaluation (WP4 / WP5)
+#    one cell = one (split, task, alpha); the queue runs them in sequence
+GPU=1 bash scripts/v9_queue2.sh 1 0 \
+  v10:classaware:hospital_mortality:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42
 ```
 
 Console entry points are declared in [pyproject.toml](pyproject.toml) if you
