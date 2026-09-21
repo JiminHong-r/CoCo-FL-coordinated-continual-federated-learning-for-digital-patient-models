@@ -49,21 +49,11 @@ POSITIVE_TOKENS = {
     "hospital_mortality": {ST.DEATH},
     "readmission": {ST.ADMISSION},
     "icu_admission": {ST.ICU_ADMISSION, ST.DEATH},
-    # Composite "any deterioration event" (matches run_ablation / WP5 harness).
-    # NB ``ICU_ADMISSION`` is UNREACHABLE here and has never contributed a
-    # positive: this task runs on ReadmissionDataset, whose outcome search is
-    # ``_match`` over {ADMISSION, DEATH, TIMELINE_END} only (readmission.py), so
-    # the outcome token can never be ICU_ADMISSION. Kept to document the intended
-    # composite; with a 30-day horizon the task is effectively
-    # "readmitted or died within 30 days", which differs from ``readmission``
-    # only by the death arm. Report the two as correlated, not independent.
-    "clinical_deterioration": {ST.ADMISSION, ST.ICU_ADMISSION, ST.DEATH},
 }
 TASKS = {
     "hospital_mortality": HospitalMortalityDataset,
     "readmission": ReadmissionDataset,
     "icu_admission": ICUAdmissionDataset,
-    "clinical_deterioration": ReadmissionDataset,
 }
 
 

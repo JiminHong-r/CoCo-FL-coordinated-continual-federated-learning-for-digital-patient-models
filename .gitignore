@@ -17,14 +17,7 @@ results_for_presentation/
 tests/
 notebooks/
 
-# --- Project working documents (local only) ----------------------------------
-# The task description asks that detailed project reports and presentations not
-# be disseminated (spec §3.11), so the write-up, the consolidated results and the
-# supervisor's task description stay out of the repository. They live on disk and
-# are shared directly, not through git.
-RESULTS.md
-REPORT_DRAFT.md
-CODE_AND_METHODS_GUIDE.md
+# --- Documents (local only) --------------------------------------------------
 *.pdf
 
 # --- Python ------------------------------------------------------------------
@@ -45,5 +38,3 @@ venv/
 .vscode/
 .idea/
 .DS_Store
-SUPERVISOR_SUMMARY.md
-WP5_RESULTS.md

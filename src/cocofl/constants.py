@@ -36,24 +36,12 @@ STATIC_DATA_FN = "static_data.pickle"
 # ``readmission`` is bounded to 30 days so it matches the standard clinical
 # definition of 30-day hospital readmission rather than "re-admitted ever".
 #
-# ``clinical_deterioration`` is bounded to the same 30 days. Unbounded, it was
-# not a clinical outcome at all: it anchors on the DRG token AFTER discharge and
-# its outcome search is the first of {ADMISSION, DEATH, TIMELINE_END}, so
-# "positive" meant "this patient's timeline continues with an admission or death
-# rather than simply ending" — a readmission-or-death event five years later
-# counted. That measured record continuation, not deterioration, and it showed:
-# the reserve pool ran at 64.6% positive, which is implausible for a
-# deterioration rate and is just the fraction of patients with any later record.
-# Bounded, it is the standard composite endpoint "readmitted or died within 30
-# days of discharge".
-#
 # Note this is only meaningful for tasks whose outcome search can actually run
 # past the horizon. ``hospital_mortality`` and ``icu_admission`` are already
 # bounded by the index stay (their outcome search terminates at the stay's
 # discharge), so adding them here would change little.
 TASK_HORIZONS: dict[str, timedelta] = {
     "readmission": timedelta(days=30),
-    "clinical_deterioration": timedelta(days=30),
 }
 
 # ``true_token_time`` on every InferenceDataset sample is

@@ -59,15 +59,6 @@ POSITIVE_TOKENS = {
     "hospital_mortality": {ST.DEATH},
     "readmission": {ST.ADMISSION},
     "icu_admission": {ST.ICU_ADMISSION, ST.DEATH},
-    # NOTE: ``clinical_deterioration`` is deliberately ABSENT from the
-    # federated (WP4/WP5) task set. It runs on ReadmissionDataset, i.e. the same
-    # prediction points as ``readmission``, and with the 30-day horizon it
-    # differs only by the death arm (22.25 % vs 20.56 % prevalence). Its
-    # documented ICU arm is unreachable: ReadmissionDataset's outcome search is
-    # {ADMISSION, DEATH, TIMELINE_END}, so ICU_ADMISSION can never be the
-    # outcome token. Reporting it as an independent fourth federated task would
-    # double-count correlated evidence. It REMAINS in the WP3 population
-    # baselines (downstream/finetune.py), where it costs nothing and is reported.
 }
 TASKS = {
     "hospital_mortality": HospitalMortalityDataset,
