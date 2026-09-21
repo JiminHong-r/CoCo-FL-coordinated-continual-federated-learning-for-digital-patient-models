@@ -29,7 +29,6 @@ src/cocofl/
   configs/         Hydra configs (training, tokenization, inference, dataset)
 scripts/           SLURM / shell launchers and analysis utilities
 docker/            CUDA 12.4 image used for cluster runs
-CoCoFL_report/     LaTeX sources for the project report
 ```
 
 ## Requirements
@@ -94,16 +93,6 @@ prefer to invoke stages directly (`cocofl_tokenize`, `cocofl_train`,
 
 Scripts under `scripts/` carry SLURM headers for cluster submission; they can
 also be run as plain shell scripts from the project root.
-
-## Report
-
-The project report is written in LaTeX and builds with a standard TeX Live
-installation, with no shell-escape required:
-
-```bash
-cd CoCoFL_report
-pdflatex Main.tex && bibtex Main && pdflatex Main.tex && pdflatex Main.tex
-```
 
 ## Note on artifacts
 
