@@ -6,11 +6,11 @@
 
 # Set the terminal prompt to be the project name
 # This covers up the ugly "no name" that would be there otherwise
-export PS1="\[\033[01;31m\][ethos-docker] \033[01;30m\]\w > \[\033[01;00m\]"
+export PS1="\[\033[01;31m\][cocofl-docker] \033[01;30m\]\w > \[\033[01;00m\]"
 
 # Edit path so that user space editable installs can be found
 export PATH=/.local/bin:${PATH}
-REPO_DIR="/ethos"
+REPO_DIR="/coco-fl"
 if [[ -f ${REPO_DIR}/pyproject.toml ]]
 then
     pip install --no-dependencies --local -e $REPO_DIR

@@ -10,8 +10,8 @@
 #   GPU=1 bash scripts/smoke_wp5.sh            # baseline config
 #   GPU=1 ARM="PER_HOSPITAL_SELECTION=true HEAD_BIAS_ONLY=true" bash scripts/smoke_wp5.sh
 set -o pipefail
-PROJECT=/home/jimin_hong/coco-fl
-export CODE_SRC=${CODE_SRC:-$PROJECT/src_v8}
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export CODE_SRC=${CODE_SRC:-$PROJECT/src}
 export MAX_ROUNDS=${MAX_ROUNDS:-2} COHORT_STEPS=${COHORT_STEPS:-2}
 export PATIENT_ITERS=${PATIENT_ITERS:-2} PATIENTS_PER_ROUND=${PATIENTS_PER_ROUND:-2}
 export MAX_PATIENTS=2 PATIENT_EVAL_PATIENTS=2

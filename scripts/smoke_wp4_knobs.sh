@@ -11,8 +11,8 @@
 #
 #   GPU=1 bash scripts/smoke_wp4_knobs.sh
 set -o pipefail
-PROJECT=/home/jimin_hong/coco-fl
-export CODE_SRC=${CODE_SRC:-$PROJECT/src_v8}
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export CODE_SRC=${CODE_SRC:-$PROJECT/src}
 export METHODS=hierarchical
 # Deliberately tiny: 2 rounds, 2 optimiser steps, 2 patients, capped eval.
 export MAX_ROUNDS=2 COHORT_STEPS=2 PATIENT_ITERS=2 PATIENTS_PER_ROUND=2

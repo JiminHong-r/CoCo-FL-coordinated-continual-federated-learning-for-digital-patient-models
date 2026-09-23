@@ -1,6 +1,6 @@
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
-WORKDIR /ethos
+WORKDIR /coco-fl
 ENV TZ=America/New_York
 ARG DEBIAN_FRONTEND=noninteractive
 

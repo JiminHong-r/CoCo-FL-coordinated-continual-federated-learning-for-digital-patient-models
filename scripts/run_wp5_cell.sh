@@ -15,14 +15,14 @@
 #
 # USAGE
 #   GPU=0 SPLIT=classaware TASK=hospital_mortality ALPHA=1.0 \
-#     CODE_SRC=/home/jimin_hong/coco-fl/src_v8 bash scripts/run_wp5_cell.sh
+#     bash scripts/run_wp5_cell.sh
 #
 #   SPLIT is `random` or `classaware` (or an absolute path to a splits dir).
 #   Output: results_v8_<split>_<task>_a<alpha>/wp5_results.csv
 set -o pipefail
 
-VENV=/home/jimin_hong/coco-fl/venv
-PROJECT=/home/jimin_hong/coco-fl
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+VENV="${VENV:-$PROJECT/venv}"
 export PATH=$VENV/bin:$PATH
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
@@ -42,8 +42,8 @@ case "$SPLIT" in
 esac
 [ -d "$SPLITS" ] || { echo "no such splits dir: $SPLITS"; exit 2; }
 
-POP_MODEL=$PROJECT/models/population_reserve_nonotes_full/best_model.pt
-COHORT=$PROJECT/data/tokenized/mimic_train
+POP_MODEL=${POP_MODEL:-$PROJECT/models/population_reserve_nonotes_full/best_model.pt}
+COHORT=${COHORT:-$PROJECT/data/tokenized/mimic_train}
 
 # --- pre-flight VRAM gate ---------------------------------------------------
 # The box is SHARED. A class-aware α=1.0 cell ran 11.7 h and then died of CUDA

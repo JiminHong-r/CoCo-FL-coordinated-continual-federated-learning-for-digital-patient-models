@@ -17,7 +17,7 @@
 # retry reduces peak footprint. Eval batching changes memory and speed only, never
 # per-window predictions, so a retried cell stays comparable to the rest.
 set -u
-PROJECT=/home/jimin_hong/coco-fl
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 GPU=${1:?gpu}; WAITPID=${2:?pid to wait for}; shift 2
 CODE_SRC=${CODE_SRC:-$PROJECT/src}
 

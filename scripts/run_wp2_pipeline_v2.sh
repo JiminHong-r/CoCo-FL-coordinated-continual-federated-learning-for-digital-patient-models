@@ -23,8 +23,8 @@
 set -e
 set -o pipefail
 
-VENV=/home/jimin_hong/coco-fl/venv
-PROJECT=/home/jimin_hong/coco-fl
+PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+VENV="${VENV:-$PROJECT/venv}"
 export PATH=$VENV/bin:$PATH
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
