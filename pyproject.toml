@@ -50,13 +50,10 @@ federated = ["flwr==1.33.0", "protobuf==6.33.6", "scikit-learn"]
 cocofl_tokenize = "cocofl.preprocess.run_tokenization:main"
 # Population backbone training
 cocofl_train = "cocofl.train.run_training:main"
-# Downstream task evaluation (population baseline)
-cocofl_infer = "cocofl.downstream.run_inference:main"
+# Downstream head fitting / linear probe (population baseline)
 cocofl_finetune = "cocofl.downstream.finetune:main"
 # Per-patient personalisation ablation (head-only / FFN / continual)
 cocofl_personalize = "cocofl.personalisation.run_ablation:main"
-# Flat federated baseline (FedAvg over hospital silos)
-cocofl_federated = "cocofl.federated.run_federated:main"
 # Hierarchical bidirectional (population <-> cohort <-> patient)
 cocofl_hierarchical = "cocofl.hierarchical.run_hierarchical:main"
 # Comprehensive evaluation harness (alpha sweep + all baselines)

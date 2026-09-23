@@ -10,43 +10,39 @@ from omegaconf import DictConfig, OmegaConf
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
-from transformers import BertConfig, EncoderDecoderConfig, EncoderDecoderModel, GPT2Config
 
-from ..data import TimelineDataset
-from ..models import GPT2LMNoBiasModel
+from ..data.static_features import TFNTimelineDataset, collate_with_static
 from ..utils import load_model_checkpoint, setup_torch
 from .metrics import estimate_loss
-from .utils import ModelType, configure_optimizers, estimate_mfu, get_lr, make_infinite_loader
+from .utils import configure_optimizers, get_lr
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="training")
+@hydra.main(version_base=None, config_path="../configs", config_name="population_training")
 def main(cfg: DictConfig):
     """This training script can be run both on a single gpu in debug mode, and also in a larger
     training run with distributed data parallel (ddp).
 
     To run on a single GPU, example:
-    $ ethos_train [args...]
+    $ cocofl_train [args...]
 
     To run with DDP on 4 gpus on 1 node, example:
 
-    $ torchrun --standalone --nproc_per_node=4 ethos_train [args...]
+    $ torchrun --standalone --nproc_per_node=4 cocofl_train [args...]
 
     To run with DDP on 4 gpus across 2 nodes, example:
 
     - Run on the first (master) node with example IP 123.456.123.456:
 
     $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456
-     --master_port=1234 ethos_train [args...]
+     --master_port=1234 cocofl_train [args...]
 
     - Run on the worker node:
 
     $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456
-     --master_port=1234 ethos_train [args...]
+     --master_port=1234 cocofl_train [args...]
 
     (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
     """
-    model_type = ModelType(cfg.model_type)
-
     device = cfg.device
     out_dir = Path(cfg.out_dir)
     # various inits, derived attributes, I/O setup
@@ -76,15 +72,7 @@ def main(cfg: DictConfig):
         out_dir.mkdir(parents=True, exist_ok=True)
     ctx = setup_torch(device, cfg.dtype, 42 + seed_offset)
 
-    if model_type == ModelType.POPULATION:
-        from ..data.static_features import TFNTimelineDataset
-        train_dataset = TFNTimelineDataset(cfg.data_fp, n_positions=cfg.n_positions)
-    else:
-        train_dataset = TimelineDataset(
-            cfg.data_fp,
-            n_positions=cfg.n_positions,
-            is_encoder_decoder=model_type == ModelType.ENC_DECODER,
-        )
+    train_dataset = TFNTimelineDataset(cfg.data_fp, n_positions=cfg.n_positions)
     vocab = train_dataset.vocab
 
     vocab_size = math.ceil(len(vocab) / 64) * 64
@@ -152,10 +140,7 @@ def main(cfg: DictConfig):
         if master_process:
             logger.info(f"Capped train windows to {len(train_dataset):,}")
 
-    collate_fn = None
-    if model_type == ModelType.POPULATION:
-        from ..data.static_features import collate_with_static
-        collate_fn = collate_with_static
+    collate_fn = collate_with_static
 
     train_dataloader, val_dataloader = (
         DataLoader(
@@ -167,8 +152,7 @@ def main(cfg: DictConfig):
         )
         for dataset in [train_dataset, val_dataset]
     )
-    # NOTE: train_dataloader is NOT wrapped in make_infinite_loader anymore.
-    # We use a proper epoch loop matching the TFN training notebook style.
+    # A proper epoch loop, matching the TFN training notebook style.
 
     num_epochs = cfg.get("num_epochs", None)
     if num_epochs is None or num_epochs <= 0:
@@ -208,53 +192,20 @@ def main(cfg: DictConfig):
         optimizer_state = checkpoint["optimizer"]
         wandb_path = checkpoint["wandb_path"]
     else:
-        config = GPT2Config(
+        from ..models.backbone import TFNFullModel
+        from ..data.static_features import CATEGORICAL_CARDINALITIES, NUMERICAL_DIM
+        raw_model = TFNFullModel(
             vocab_size=vocab_size,
-            n_positions=cfg.n_positions,
             n_embd=cfg.n_embd,
             n_layer=cfg.n_layer,
-            n_head=cfg.n_head,
-            n_inner=None,
-            activation_function=cfg.activation,
-            resid_pdrop=cfg.dropout,
-            embd_pdrop=cfg.dropout,
-            attn_pdrop=cfg.dropout,
-            bias=False,
+            n_positions=cfg.n_positions,
+            categorical_cardinalities=CATEGORICAL_CARDINALITIES,
+            numerical_dim=NUMERICAL_DIM,
+            use_static=True,
         )
-        if model_type == ModelType.ENC_DECODER:
-            encoder_config = BertConfig(
-                vocab_size=vocab_size,
-                hidden_size=cfg.n_embd,
-                num_hidden_layers=1,
-                num_attention_heads=cfg.n_head,
-                intermediate_size=cfg.n_embd * 4,
-                hidden_act=cfg.activation,
-                hidden_dropout_prob=cfg.dropout,
-                attention_probs_dropout_prob=cfg.dropout,
-                max_position_embeddings=train_dataset.dataset.context_size,
-                max_length=train_dataset.dataset.context_size,
-                is_encoder_decoder=True,
-                use_bfloat16=True,
-            )
-            config = EncoderDecoderConfig.from_encoder_decoder_configs(encoder_config, config)
-            raw_model = EncoderDecoderModel(config=config)
-        elif model_type == ModelType.POPULATION:
-            from ..models.backbone import TFNFullModel
-            from ..data.static_features import CATEGORICAL_CARDINALITIES, NUMERICAL_DIM
-            raw_model = TFNFullModel(
-                vocab_size=vocab_size,
-                n_embd=cfg.n_embd,
-                n_layer=cfg.n_layer,
-                n_positions=cfg.n_positions,
-                categorical_cardinalities=CATEGORICAL_CARDINALITIES,
-                numerical_dim=NUMERICAL_DIM,
-                use_static=True,
-            )
-        else:
-            raw_model = GPT2LMNoBiasModel(config)
 
         if master_process:
-            logger.info(f"Initializing a new model from scratch: {config}")
+            logger.info(f"Initializing a new model from scratch: {raw_model.config}")
     logger.info(f"Model parameters: {raw_model.num_parameters() / 1e6:.2f}M")
 
     raw_model.to(device)
@@ -305,7 +256,6 @@ def main(cfg: DictConfig):
     # ---- TFN-style epoch-based training loop ----
     iter_num = 0
     local_iter_num = 0
-    running_mfu = -1.0
     t0 = time.time()
 
     for epoch in range(num_epochs):
@@ -333,16 +283,11 @@ def main(cfg: DictConfig):
                         micro_step == cfg.gradient_accumulation_steps - 1
                     )
                 with ctx:
-                    if model_type == ModelType.POPULATION:
-                        # X is (tokens, elapsed_times, static_cat, static_num)
-                        output = model(
-                            input_ids=X[0], elapsed_times=X[1],
-                            static_categorical=X[2], static_numerical=X[3], labels=Y,
-                        )
-                    elif isinstance(X, tuple):
-                        output = model(input_ids=X[0], decoder_input_ids=X[1], labels=Y)
-                    else:
-                        output = model(input_ids=X, labels=Y)
+                    # X is (tokens, elapsed_times, static_cat, static_num)
+                    output = model(
+                        input_ids=X[0], elapsed_times=X[1],
+                        static_categorical=X[2], static_numerical=X[3], labels=Y,
+                    )
                     loss = output.loss / cfg.gradient_accumulation_steps
                 scaler.scale(loss).backward()
 
@@ -358,14 +303,9 @@ def main(cfg: DictConfig):
             t0 = t1
             if iter_num % cfg.log_interval == 0 and master_process:
                 lossf = loss.item() * cfg.gradient_accumulation_steps
-                if local_iter_num >= 5 and model_type == ModelType.DECODER:
-                    mfu = estimate_mfu(
-                        raw_model, num_params, cfg.batch_size * cfg.gradient_accumulation_steps, dt
-                    )
-                    running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
                 logger.info(
                     f"[ep{epoch + 1} b{batch_idx} it{iter_num}]: "
-                    f"loss={lossf:.4f}, time={dt * 1000:.0f}ms, mfu={running_mfu:.2%}"
+                    f"loss={lossf:.4f}, time={dt * 1000:.0f}ms"
                 )
 
             iter_num += 1
@@ -400,7 +340,7 @@ def main(cfg: DictConfig):
                 "best_metric_score": best_metric_score,
                 "model_config": raw_model.config,
                 "vocab": vocab.stoi,
-                "model_type": str(model_type),
+                "model_type": "population",
                 "wandb_path": wandb_run.path if wandb_run is not None else None,
             }
             th.save(checkpoint, out_dir / "recent_model.pt")
@@ -415,7 +355,6 @@ def main(cfg: DictConfig):
                         "other/epoch": epoch + 1,
                         "other/iter": iter_num,
                         "other/lr": lr,
-                        "other/mfu": running_mfu * 100,
                         **losses,
                     }
                 )

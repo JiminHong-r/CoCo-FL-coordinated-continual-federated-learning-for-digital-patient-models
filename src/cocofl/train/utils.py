@@ -1,19 +1,7 @@
 import inspect
 import math
-from enum import StrEnum
 
 import torch
-
-
-class ModelType(StrEnum):
-    DECODER = "decoder"
-    ENC_DECODER = "encoder-decoder"
-    POPULATION = "population"           # TFNFullModel (static + T-LSTM)
-
-
-def make_infinite_loader(loader):
-    while True:
-        yield from iter(loader)
 
 
 def get_lr(it, args):
@@ -53,32 +41,3 @@ def configure_optimizers(model: torch.nn.Module, weight_decay, learning_rate, be
     optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
 
     return optimizer
-
-
-def estimate_mfu(model, num_params, fwdbwd_per_iter, dt):
-    """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS."""
-    # first estimate the number of flops we do per iteration.
-    # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-    cfg = model.config
-    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.n_positions
-    flops_per_token = 6 * num_params + 12 * L * H * Q * T
-    flops_per_fwdbwd = flops_per_token * T
-    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-    # express our flops throughput as ratio of A100 bfloat16 peak flops
-    flops_achieved = flops_per_iter * (1.0 / dt)  # per second
-    flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-    mfu = flops_achieved / flops_promised
-    return mfu
-
-
-def get_num_params(self, non_embedding=True):
-    """Return the number of parameters in the model.
-
-    For non-embedding count (default), the position embeddings get subtracted. The token embeddings
-    would too, except due to the parameter sharing these params are actually used as weights in the
-    final layer, so we include them.
-    """
-    n_params = sum(p.numel() for p in self.parameters())
-    if non_embedding:
-        n_params -= self.wpe.weight.numel()
-    return n_params

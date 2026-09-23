@@ -1,7 +1,20 @@
+import time
 from collections.abc import Callable
 from importlib import import_module
+from pathlib import Path
 
 import polars as pl
+from loguru import logger
+
+
+def wait_for_workers(output_dir: str | Path, sleep_time: int = 2):
+    time_slept = 0
+    output_dir = Path(output_dir)
+    while any(output_dir.glob(".*.parquet_cache/locks/*.json")):
+        time.sleep(sleep_time)
+        time_slept += sleep_time
+        if time_slept > 30:
+            logger.warning(f"Waiting for: {list(output_dir.glob('.*.parquet_cache/locks/*.json'))}")
 
 
 def create_prefix_or_chain(prefixes: list[str]) -> pl.Expr:

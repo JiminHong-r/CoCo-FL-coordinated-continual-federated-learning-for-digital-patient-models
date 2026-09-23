@@ -27,9 +27,7 @@ import numpy as np
 import pandas as pd
 
 # Import the existing split + dataset helpers.
-from cocofl.constants import SpecialToken as ST
 from cocofl.constants import horizon_microseconds
-from cocofl.data import HospitalMortalityDataset, ICUAdmissionDataset, ReadmissionDataset
 from cocofl.downstream.probe import window_labels
 from cocofl.evaluation.batching import sequence_lengths
 from cocofl.federated.fixed_splits import load_split
@@ -38,21 +36,11 @@ from cocofl.federated.hospital_split import (
     dirichlet_split_patients,
     summarize_split,
 )
+from cocofl.personalisation.run_ablation import POSITIVE_TOKENS, TASKS
 
 # Labels are identical for every hospital of every alpha, so compute them once
 # per (dataset, task) instead of once per cell.
 _LABEL_CACHE: dict[tuple[int, str], "np.ndarray"] = {}
-
-POSITIVE_TOKENS = {
-    "hospital_mortality": {ST.DEATH},
-    "readmission": {ST.ADMISSION},
-    "icu_admission": {ST.ICU_ADMISSION, ST.DEATH},
-}
-TASKS = {
-    "hospital_mortality": HospitalMortalityDataset,
-    "readmission": ReadmissionDataset,
-    "icu_admission": ICUAdmissionDataset,
-}
 
 
 def positive_rate(dataset, indices, pos_tokens, task_name=None) -> tuple[int, int]:

@@ -11,10 +11,9 @@ from omegaconf import DictConfig, OmegaConf
 from ..constants import STATIC_DATA_FN
 from ..constants import SpecialToken as ST
 from ..data import TimelineDataset
-from ..downstream.utils import wait_for_workers
 from ..vocabulary import Vocabulary
 from .run_stage import run_stage
-from .utils import load_function
+from .utils import load_function, wait_for_workers
 
 OmegaConf.register_new_resolver("default_if_null", lambda a, b: b if a is None else a)
 OmegaConf.register_new_resolver("is_not_null", lambda v: v is not None)

@@ -6,7 +6,7 @@ from pathlib import Path
 import polars as pl
 from MEDS_transforms.mapreduce.utils import rwlock_wrap
 
-from ..downstream.utils import wait_for_workers
+from .utils import wait_for_workers
 from ..vocabulary import Vocabulary
 
 

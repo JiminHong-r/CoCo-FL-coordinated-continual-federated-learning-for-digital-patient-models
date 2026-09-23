@@ -32,78 +32,17 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-from ..constants import SpecialToken as ST
 from ..constants import STATIC_DATA_FN, horizon_microseconds
-from ..data import HospitalMortalityDataset, ICUAdmissionDataset, ReadmissionDataset
-from ..data.static_features import build_static_arrays, NUMERICAL_DIM
+from ..data.static_features import build_static_arrays
 from ..evaluation.batching import make_eval_loader
 from ..models.classifier import TFNDownstreamClassifier
 from ..models.backbone import TFNFullModel
+from ..personalisation.run_ablation import POSITIVE_TOKENS, TASKS, make_collate
 from ..vocabulary import Vocabulary
 from .probe import (
     extract_features, fit_balanced_probe, fit_torch_head, score,
     stratified_subsample, window_labels,
 )
-
-POSITIVE_TOKENS = {
-    "hospital_mortality": {ST.DEATH},
-    "readmission": {ST.ADMISSION},
-    "icu_admission": {ST.ICU_ADMISSION, ST.DEATH},
-}
-TASKS = {
-    "hospital_mortality": HospitalMortalityDataset,
-    "readmission": ReadmissionDataset,
-    "icu_admission": ICUAdmissionDataset,
-}
-
-
-def make_collate(cat_by_pid, num_by_pid, dataset=None):
-    """Collate for downstream head fitting / probing.
-
-    Pass ``dataset`` so the T-LSTM receives REAL inter-event times. Without it,
-    elapsed was all-ones, which pins the time decay at a constant and fits the
-    head on features produced outside the backbone's training distribution — so
-    the population heads in models/population_heads/ were fitted that way and
-    must be refitted. See cocofl.data.elapsed.
-    """
-    from ..data.elapsed import dataset_supports_elapsed, elapsed_for_window
-
-    use_real = dataset is not None and dataset_supports_elapsed(dataset)
-    if dataset is not None and not use_real:
-        import warnings
-        warnings.warn(
-            "make_collate: dataset cannot supply inter-event times; falling back "
-            "to elapsed=1.0, which disables the T-LSTM time decay (WP3 task 1).",
-            stacklevel=2,
-        )
-
-    def collate(batch):
-        batch = [b for b in batch if b is not None]
-        if not batch:
-            return None
-        xs = torch.stack([b[0] for b in batch])
-        pids = [b[1].get("patient_id") for b in batch]
-        cats = torch.stack([
-            cat_by_pid.get(pid, torch.zeros(3, dtype=torch.long)) for pid in pids
-        ])
-        nums = torch.stack([
-            num_by_pid.get(pid, torch.zeros(NUMERICAL_DIM, dtype=torch.float32)) for pid in pids
-        ])
-        if use_real:
-            elapsed = torch.stack([
-                elapsed_for_window(dataset, b[1]["data_idx"], xs.size(1))
-                for b in batch
-            ])
-        else:
-            elapsed = torch.ones_like(xs, dtype=torch.float32)
-        labels = {
-            "expected": [b[1]["expected"] for b in batch],
-            # Needed by time-bounded tasks (see constants.TASK_HORIZONS): elapsed
-            # microseconds from the prediction point to the outcome token.
-            "true_token_time": [b[1].get("true_token_time") for b in batch],
-        }
-        return (xs, elapsed, cats, nums), labels
-    return collate
 
 
 def label_from_batch(label_dicts, pos_tokens, horizon_us=None):

@@ -1,13 +1,9 @@
 from contextlib import nullcontext
-from functools import partial
 from pathlib import Path
 
-import polars as pl
 import torch as th
-from transformers import EncoderDecoderModel
 
-from .constants import MAPPINGS_DIR
-from .models import GPT2LMNoBiasModel
+from .models.backbone import TFNFullModel
 
 
 def setup_torch(device, dtype, seed=42):
@@ -29,48 +25,30 @@ def setup_torch(device, dtype, seed=42):
     return ctx
 
 
-def load_model_checkpoint(checkpoint_fp: str | Path, **kwargs) -> tuple[
-    GPT2LMNoBiasModel | EncoderDecoderModel, dict]:
-    """Load model from a checkpoint file, **kwargs are passed to `torch.load`."""
+def load_model_checkpoint(checkpoint_fp: str | Path, **kwargs) -> tuple[TFNFullModel, dict]:
+    """Rebuild the population backbone from a checkpoint, **kwargs go to `torch.load`.
+
+    This used to reconstruct a GPT2LMNoBiasModel or an EncoderDecoderModel from
+    ``model_config.is_encoder_decoder``. TFNFullModel's config is a SimpleNamespace
+    with no such attribute, so resuming a population run raised AttributeError —
+    the only checkpoints this project produces were the ones it could not load.
+    Reconstruction now matches ``build_population_classifier``.
+    """
     checkpoint = th.load(checkpoint_fp, weights_only=False, **kwargs)
+    cfg = checkpoint["model_config"]
 
-    if checkpoint["model_config"].is_encoder_decoder:
-        model = EncoderDecoderModel(checkpoint["model_config"])
-    else:
-        model = GPT2LMNoBiasModel(checkpoint["model_config"])
-
+    model = TFNFullModel(
+        vocab_size=cfg.vocab_size,
+        n_embd=cfg.n_embd,
+        n_layer=cfg.n_layer,
+        n_positions=cfg.n_positions,
+        categorical_cardinalities=tuple(cfg.categorical_cardinalities),
+        numerical_dim=cfg.numerical_dim,
+        use_static=cfg.use_static,
+        num_heads=getattr(cfg, "num_heads", 2),
+    )
     model.load_state_dict(checkpoint["model"])
 
     del checkpoint["model"]
     del checkpoint["model_config"]
     return model, checkpoint
-
-
-def get_mimic_hf_patients(mimic_dir: str | Path) -> list[str]:
-    if not (mimic_dir / "hosp").is_dir():
-        raise FileNotFoundError(f"Expected, but not found: {mimic_dir / 'hosp'}")
-    read_fn = pl.scan_parquet
-    if not (mimic_dir / "hosp" / "diagnoses_icd.parquet").is_file():
-        read_fn = partial(pl.scan_csv, infer_schema_length=None)
-    return (
-        (
-            read_fn(mimic_dir / "hosp" / "diagnoses_icd.*")
-            .filter(
-                pl.col("icd_code").is_in(
-                    read_fn(mimic_dir / "hosp" / "d_icd_diagnoses.*")
-                    .select("icd_code")
-                    .filter(pl.col("icd_code").str.slice(0, 3).is_in(["428", "I50"]))
-                    .collect()
-                    .to_series()
-                )
-            )
-            .select(pl.col("subject_id").unique())
-            .collect()
-        )
-        .to_series()
-        .to_list()
-    )
-
-
-def get_mimic_sepsis_icu_stays() -> pl.DataFrame:
-    return pl.read_csv(MAPPINGS_DIR / "mimic-iv_derived.csv.gz").filter("sepsis")
