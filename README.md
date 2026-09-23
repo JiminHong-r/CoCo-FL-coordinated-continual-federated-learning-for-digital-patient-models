@@ -8,8 +8,8 @@ representation frozen. The work is split across work packages:
 
 | WP  | Question                                                          | Entry point          |
 | --- | ----------------------------------------------------------------- | -------------------- |
-| WP2 | Can a population backbone beat a T-LSTM baseline downstream?       | `cocofl_train`       |
-| WP3 | How much personalisation is possible without forgetting?           | `cocofl_personalize` |
+| WP2 | Split one cohort into 3 heterogeneous centres and characterise them | `build_split_v2.py`  |
+| WP3 | Does the population T-LSTM generalise on held-out downstream tasks? | `cocofl_train`       |
 | WP4 | Does this survive federation across hospital silos (FedAvg)?       | `cocofl_evaluate`    |
 | WP5 | Does hierarchical population ↔ cohort ↔ patient coordination help? | `cocofl_evaluate`    |
 
@@ -176,6 +176,13 @@ per-centre characterisation, backbone) on the quantity-only partition with a
 10,000-window training cap. That cap and that partition are the WP2
 characterisation setting, **not** the inputs the reported WP4/WP5 grid consumes
 — for those, follow steps 3–5 above.
+
+Two further console entry points exist and are **not** part of the reported
+grid: `cocofl_personalize` runs the per-patient adaptation ablation
+(head-only / FFN / continual strategies) standalone, and `cocofl_hierarchical`
+runs the hierarchical loop outside the comparison harness. Both are useful for
+inspecting one level in isolation; every reported number comes from
+`cocofl_evaluate`.
 
 ## Validating the pipeline without running a full grid
 
