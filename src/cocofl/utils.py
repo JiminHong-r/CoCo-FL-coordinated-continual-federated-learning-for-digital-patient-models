@@ -52,3 +52,22 @@ def load_model_checkpoint(checkpoint_fp: str | Path, **kwargs) -> tuple[TFNFullM
     del checkpoint["model"]
     del checkpoint["model_config"]
     return model, checkpoint
+
+
+def dump_config(cfg, path) -> None:
+    """Write the resolved config beside the results. Never fail the run over it.
+
+    ``resolve=True`` evaluates interpolations, which is what makes the dump
+    useful — it records the paths actually used, not ``${...}``. A config that
+    interpolates through a custom resolver can raise here, and a run that takes
+    hours must not die at minute zero because its provenance file could not be
+    written, so an unresolved dump is better than no run.
+    """
+    from omegaconf import OmegaConf
+
+    try:
+        Path(path).write_text(OmegaConf.to_yaml(cfg, resolve=True))
+    except Exception as exc:  # noqa: BLE001 - provenance is best-effort
+        Path(path).write_text(
+            f"# resolve failed: {exc!r}\n" + OmegaConf.to_yaml(cfg, resolve=False)
+        )

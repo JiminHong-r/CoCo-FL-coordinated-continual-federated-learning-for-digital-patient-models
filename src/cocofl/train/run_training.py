@@ -12,7 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 
 from ..data.static_features import TFNTimelineDataset, collate_with_static
-from ..utils import load_model_checkpoint, setup_torch
+from ..utils import dump_config, load_model_checkpoint, setup_torch
 from .metrics import estimate_loss
 from .utils import configure_optimizers, get_lr
 
@@ -70,6 +70,10 @@ def main(cfg: DictConfig):
     if master_process:
         logger.info(f"Tokens per iteration per worker: {tokens_per_iter:,}")
         out_dir.mkdir(parents=True, exist_ok=True)
+        # The resolved config beside the checkpoint it produced. Which
+        # `num_epochs` and `n_train_windows` a backbone was trained with is not
+        # recoverable from the .pt, and both change the model substantially.
+        dump_config(cfg, out_dir / "config.yaml")
     ctx = setup_torch(device, cfg.dtype, 42 + seed_offset)
 
     train_dataset = TFNTimelineDataset(cfg.data_fp, n_positions=cfg.n_positions)

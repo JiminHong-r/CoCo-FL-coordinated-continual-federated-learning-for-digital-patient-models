@@ -40,6 +40,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Subset
 
 from ..constants import STATIC_DATA_FN, horizon_microseconds
+from ..utils import dump_config
 from ..data.static_features import build_static_arrays
 from ..hierarchical.cohort import CohortConfig
 from ..hierarchical.coordinator import CoordinatorConfig, HierarchicalCoordinator
@@ -486,6 +487,13 @@ def main(cfg: DictConfig):
     model_path = Path(cfg.model_path)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # The resolved config, beside the results it produced. wp5_results.csv
+    # records a handful of knobs as columns; this is the other ~40, plus the
+    # paths to the split, the cohort and the checkpoint. `inference.yaml` sets
+    # `hydra.output_subdir: null`, so without this a finished cell carried no
+    # record of what produced it.
+    dump_config(cfg, output_dir / "config.yaml")
 
     # Knobs
     num_hospitals = int(getattr(cfg, "num_hospitals", 3))

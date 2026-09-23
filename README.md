@@ -88,7 +88,37 @@ ICD-PCS, ATC) and are committed.
 [scripts/convert_icds_from_txt_to_csv.py](scripts/convert_icds_from_txt_to_csv.py)
 is how they were built.
 
+## Expected directory structure
+
+Code is in the repository; everything below is built locally and ignored by git.
+
+```
+coco-fl/
+  data/
+    mimic_meds/                      scripts/meds/run_mimic.sh writes this
+    tokenized/mimic_train/           cocofl_tokenize; must hold static_data.pickle
+    federated_splits_v2/             build_split_v2.py            (quantity-only)
+    federated_splits_v2_classaware/  build_split_v2.py --class-aware  ← reported
+        global_test.json  population_reserve.json  alpha_{0.1,0.5,1.0,10.0}.json
+  models/
+    population_reserve_nonotes_full/best_model.pt     the backbone
+    population_heads/<task>.pt                        one head per task
+  results_<tag>_<split>_<task>_a<alpha>/
+    config.yaml  wp5_results.csv  predictions_<task>_a<alpha>.npz  patient_records.csv
+  venv/                              or set VENV=/path/to/your/env
+```
+
 ## Reproducing the reported results
+
+`run.sh` is the entry point; `bash run.sh` on its own lists the stages.
+
+```bash
+bash run.sh tests      # no data, no GPU
+bash run.sh smoke      # whole WP5 path, tiny budget, ~20 min
+bash run.sh all        # splits -> backbone -> heads -> grid -> analysis
+```
+
+The steps below are what those stages run, in case you want them one at a time.
 
 The reported grid is **12 cells**: the class-aware partition × 3 tasks
 (`hospital_mortality`, `readmission`, `icu_admission`) × 4 Dirichlet α
@@ -120,14 +150,18 @@ python scripts/build_split_v2.py \
   --alphas 0.1,0.5,1.0,10.0 --num-hospitals 3 --seed 42 --class-aware
 
 # 4. population backbone: next-token pre-training on the 40% reserve ONLY.
-#    No window cap — the reported backbone saw 45,889 non-overlapping windows.
+#    n_train_windows=0 lifts the window cap and num_epochs=5 overrides the
+#    config's smoke-scale defaults; together these give the reported backbone,
+#    45,889 non-overlapping windows over five epochs.
 torchrun --no_python --standalone --nproc_per_node=1 cocofl_train \
   --config-name=population_training \
   data_fp=data/tokenized/mimic_train \
   population_reserve_path=data/federated_splits_v2/population_reserve.json \
-  val_size=0.05 \
+  val_size=0.05 num_epochs=5 n_train_windows=0 \
   out_dir=models/population_reserve_nonotes_full \
   device=cuda
+# -> best_model.pt (best epoch, the one everything downstream loads),
+#    recent_model.pt (last epoch) and config.yaml
 
 # 5. task heads + the population baseline table, from the SAME run.
 #    Writes models/population_heads/, which every WP4/WP5 cell then loads.
@@ -183,6 +217,53 @@ grid: `cocofl_personalize` runs the per-patient adaptation ablation
 runs the hierarchical loop outside the comparison harness. Both are useful for
 inspecting one level in isolation; every reported number comes from
 `cocofl_evaluate`.
+
+## Seeds, determinism, and how close a re-run gets
+
+Two seeds, deliberately separate, both recorded in every cell's `config.yaml`
+and as columns in `wp5_results.csv`:
+
+- `SEED` (42) fixes the **data**: the Dirichlet partition, the balanced-sampling
+  draw and the dataloader order. Hold it fixed across a campaign — changing it
+  redraws which patients belong to which centre.
+- `RUN_SEED` (42) fixes the **training**: torch's global RNG, which initialises
+  each adapter. Vary this one to measure run-to-run variance on the same
+  partition.
+
+`build_split_v2.py` seeds Python's `random` from `--seed`, so the splits are
+exactly reproducible — that is why they are regenerated rather than shipped.
+
+**Expected tolerance.** Re-running a cell at the same two seeds on the same
+machine reproduces every reported metric exactly; we verify this by diffing
+cell CSVs column by column. Two things move the numbers and are not defects:
+
+- Running the federated steps through Flower rather than the in-process loop
+  (`USE_FLOWER`) changes the order of the same arithmetic, so results agree to
+  within **±0.0008 AUROC**, not exactly. Do not mix the two inside one grid.
+- A different GPU or CUDA version can move the last digits through
+  non-deterministic kernels. We do not set
+  `torch.use_deterministic_algorithms(True)`, because the cost outweighs the
+  benefit at effects of this size — the reported differences vs
+  `population_only` are ~0.001–0.003, which is the same order, so the paired
+  bootstrap in `scripts/paired_bootstrap.py`, not a point estimate, is what
+  carries the conclusions.
+
+**The environment the reported numbers came from**, and the authoritative
+reproduction target — development on macOS is validated by re-running
+`bash run.sh smoke` here before anything is believed:
+
+| | |
+| --- | --- |
+| OS | Ubuntu 24.04.4 LTS, kernel 6.8.0 |
+| Python | 3.12.3 |
+| GPU | NVIDIA RTX A6000 (48 GiB), driver 575.57.08, CUDA runtime 12.9 |
+| torch | 2.7.1+cu126 (built for CUDA 12.6, cuDNN 9.5.1) |
+| federation | flwr 1.33.0 |
+
+`docker/Dockerfile` is built on `nvidia/cuda:12.4.1-devel-ubuntu22.04`, which is
+older than the machine above. The torch wheel pinned in
+`docker/requirements.txt` ships its own CUDA runtime, so the image works, but it
+is not a byte-for-byte image of the reported environment — the table is.
 
 ## Validating the pipeline without running a full grid
 

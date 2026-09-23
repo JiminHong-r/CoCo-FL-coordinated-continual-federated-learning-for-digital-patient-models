@@ -1,7 +1,6 @@
 # Full-TFN Training Configuration (matches TFN_Temporal-Fusion-Nexus/notebook/training.ipynb)
 # Architecture: StaticEncoder + TimeAwareAttentionEncoder (T-LSTM + temporal attn)
 # Loss: next-token cross-entropy (token sequences from ETHOS tokenization)
-model_type: "population"
 data_fp: ???
 val_size: ???
 # WP2 task 3: exclusive 40% population reserve (data/federated_splits_v2/population_reserve.json).
@@ -20,8 +19,12 @@ wandb_run_name: "tfn_full_run"
 # training parameters (TFN paper defaults)
 batch_size: 16
 gradient_accumulation_steps: 1
+# Defaults are a SMALL smoke-scale run. The reported backbone was trained with
+# `num_epochs=5 n_train_windows=0` (0 = no cap), which is 45,889 non-overlapping
+# windows of the 40% reserve; see the README. Leaving the defaults in place
+# trains a 3,000-window model that will not reproduce the reported results.
 num_epochs: 3
-n_train_windows: 3000   # ~10K patients worth (TFN-scale subset)
+n_train_windows: 3000
 
 # model parameters (TFN CONFIG: lstm_hidden_size=512, lstm_num_layers=2)
 n_positions: 2048
