@@ -46,7 +46,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from paired_bootstrap import _ece, load, macro_metric, reportable  # noqa: E402
+from paired_bootstrap import load, macro_metric, reportable  # noqa: E402
 
 METHODS = ["local_finetune", "standard_fedavg", "top_down_only", "hierarchical"]
 REF = "population_only"

@@ -25,8 +25,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from ..adapters import (
-    adapter_state_dict, attach_ffn_adapter, load_adapter_state_dict,
-    level_state_dict, load_level_state_dict,
+    attach_ffn_adapter, level_state_dict, load_level_state_dict,
 )
 from ..hierarchical.coordinator import CoordinatorConfig, HierarchicalCoordinator
 from ..models.classifier import TFNDownstreamClassifier

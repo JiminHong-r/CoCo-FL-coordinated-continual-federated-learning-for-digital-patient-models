@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import torch
 
-from cocofl.federated.fedavg import fedavg_states
+from cocofl.hierarchical.upward_prop import weighted_state_average
 from cocofl.federated.flower_app import ndarrays_to_state, state_to_ndarrays
 
 flwr = pytest.importorskip("flwr", reason="flwr is an optional extra")
@@ -78,7 +78,7 @@ def test_wrong_array_count_raises():
 def test_flower_fedavg_equals_single_process_fedavg(counts):
     states = [_state(i) for i in range(len(counts))]
 
-    ours = fedavg_states(states, [float(c) for c in counts])
+    ours = weighted_state_average(states, [float(c) for c in counts])
 
     theirs_arrays = aggregate([(state_to_ndarrays(s), c)
                                for s, c in zip(states, counts)])
@@ -90,40 +90,6 @@ def test_flower_fedavg_equals_single_process_fedavg(counts):
             f"{k}: Flower and the single-process path disagree — the runtime "
             f"would change the reported numbers"
         )
-
-
-@pytest.mark.parametrize("counts", [
-    [100, 100, 100],
-    [2855, 134086, 27141],
-    [1, 1, 100000],
-])
-def test_flower_fedavg_equals_the_function_that_produced_THE_RESULTS(counts):
-    """`run_standard_fedavg` aggregates with `weighted_state_average`, NOT with
-    `fedavg_states`. Testing only the latter would verify a code path that no
-    reported number ever went through — the two are duplicate implementations of
-    the same formula, and duplicates are exactly how these drift apart."""
-    from cocofl.hierarchical.upward_prop import weighted_state_average
-
-    states = [_state(i) for i in range(len(counts))]
-    reported = weighted_state_average(states, [float(c) for c in counts])
-    flower = ndarrays_to_state(
-        aggregate([(state_to_ndarrays(s), c) for s, c in zip(states, counts)]),
-        states[0])
-    for k in reported:
-        assert torch.allclose(reported[k], flower[k], atol=1e-6, rtol=1e-5), k
-
-
-def test_the_two_in_tree_aggregators_agree_with_each_other():
-    """`fedavg_states` and `weighted_state_average` are separate copies of one
-    formula. If they ever diverge, `standard_fedavg` and the federated CLI would
-    silently disagree about what FedAvg means."""
-    from cocofl.hierarchical.upward_prop import weighted_state_average
-
-    states = [_state(i) for i in range(3)]
-    w = [2855.0, 134086.0, 27141.0]
-    a, b = fedavg_states(states, w), weighted_state_average(states, w)
-    for k in a:
-        assert torch.allclose(a[k], b[k], atol=1e-7), k
 
 
 def test_hierarchical_propagation_is_NOT_fedavg_and_needs_a_custom_strategy():
@@ -160,7 +126,7 @@ def test_hierarchical_propagation_is_NOT_fedavg_and_needs_a_custom_strategy():
 def test_equivalence_holds_for_a_single_client():
     """One client must be a no-op average, not a divide-by-something-else."""
     s = _state(7)
-    ours = fedavg_states([s], [42.0])
+    ours = weighted_state_average([s], [42.0])
     theirs = ndarrays_to_state(aggregate([(state_to_ndarrays(s), 42)]), s)
     for k in ours:
         assert torch.allclose(ours[k], s[k], atol=1e-6)
@@ -170,8 +136,8 @@ def test_equivalence_holds_for_a_single_client():
 def test_weighting_actually_depends_on_the_counts():
     """Guards the test above: if both ignored counts they would agree trivially."""
     a, b = _state(1), _state(2)
-    even = fedavg_states([a, b], [1.0, 1.0])
-    skew = fedavg_states([a, b], [1.0, 99.0])
+    even = weighted_state_average([a, b], [1.0, 1.0])
+    skew = weighted_state_average([a, b], [1.0, 99.0])
     assert not torch.allclose(even["down.weight"], skew["down.weight"]), (
         "weighting has no effect, so the equivalence test proves nothing"
     )

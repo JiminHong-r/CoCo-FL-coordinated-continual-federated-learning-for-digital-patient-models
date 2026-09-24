@@ -15,14 +15,12 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..models.classifier import TFNDownstreamClassifier
 from ..adapters import (
-    adapter_state_dict, attach_ffn_adapter, load_adapter_state_dict,
-    level_state_dict, load_level_state_dict,
+    attach_ffn_adapter, level_state_dict, load_level_state_dict,
 )
 
 

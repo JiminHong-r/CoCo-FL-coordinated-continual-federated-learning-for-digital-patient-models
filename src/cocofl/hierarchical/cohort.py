@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 

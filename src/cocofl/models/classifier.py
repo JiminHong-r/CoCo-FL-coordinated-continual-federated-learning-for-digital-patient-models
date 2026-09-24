@@ -3,7 +3,6 @@
 Extracts the last-timestep hidden representation from TFNFullModel and adds an
 MLP head for binary classification. The backbone is frozen during fine-tuning.
 """
-import torch
 import torch.nn as nn
 
 

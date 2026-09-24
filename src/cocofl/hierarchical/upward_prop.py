@@ -23,7 +23,6 @@ with small ``η`` (default 0.1) to maintain stability per Spec WP4 task 5.
 """
 from __future__ import annotations
 
-from typing import Iterable
 
 import torch
 

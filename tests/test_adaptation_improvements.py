@@ -16,11 +16,10 @@ transfer (the full head file is ~529 KB against the adapter's 264 KB payload).
 """
 from __future__ import annotations
 
-import torch
 import torch.nn as nn
 
 from cocofl.adapters.ffn import (
-    FFNAdapter, attach_ffn_adapter, head_bias_parameters, level_state_dict,
+    FFNAdapter, head_bias_parameters, level_state_dict,
 )
 from cocofl.evaluation.baselines import _round_loop_with_early_stopping
 from cocofl.hierarchical.cohort import CohortConfig

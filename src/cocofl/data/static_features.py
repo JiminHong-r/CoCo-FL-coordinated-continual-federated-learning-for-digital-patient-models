@@ -6,11 +6,7 @@ Maps each patient to:
 
 Used by TFNFullModel's StaticEncoder.
 """
-import pickle
-from pathlib import Path
-
 import torch
-from torch.utils.data import Dataset, Subset
 
 from .base import TimelineDataset
 

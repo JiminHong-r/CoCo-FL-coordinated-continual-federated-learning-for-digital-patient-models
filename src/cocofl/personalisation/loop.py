@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..models.classifier import TFNDownstreamClassifier
-from ..adapters import attach_ffn_adapter, FFNAdapter
+from ..adapters import attach_ffn_adapter
 
 
 # --- Trainable-set helpers ---------------------------------------------------

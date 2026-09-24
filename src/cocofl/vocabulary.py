@@ -1,8 +1,6 @@
 import functools
 import json
-import operator
 from collections.abc import Sequence
-from datetime import timedelta
 from pathlib import Path
 from typing import TypeVar
 
@@ -102,27 +100,3 @@ class Vocabulary:
     @property
     def quantile_stokens(self) -> list[str]:
         return [t for t in self.stoi.keys() if t.startswith("Q") and t[1:].isdigit()]
-
-    @property
-    def time_interval_stokens(self) -> list[str]:
-        return list(self.interval_estimates["mean"].keys())
-
-    def get_timeline_total_time(
-        self,
-        timeline: Sequence[int | str],
-        stat: str = "mean",
-        input_str: bool = False,
-    ) -> timedelta:
-        if not input_str:
-            timeline = (self.decode(t) for t in timeline)
-
-        interval_estimates = self.interval_estimates[stat]
-        return functools.reduce(
-            operator.add,
-            (
-                timedelta(microseconds=interval_estimates[t])
-                for t in timeline
-                if t in interval_estimates
-            ),
-            timedelta(0),
-        )

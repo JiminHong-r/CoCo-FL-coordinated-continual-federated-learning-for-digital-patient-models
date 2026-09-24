@@ -24,10 +24,9 @@ from torch.utils.data import DataLoader
 
 from ..models.classifier import TFNDownstreamClassifier
 from ..adapters import (
-    adapter_state_dict, attach_ffn_adapter, load_adapter_state_dict,
-    level_state_dict, load_level_state_dict,
+    attach_ffn_adapter, level_state_dict, load_level_state_dict,
 )
-from .cohort import CohortConfig, train_cohort_adapter
+from .cohort import CohortConfig
 from .patient import PatientConfig, train_patient_adapter
 from .upward_prop import (
     propagate_cohorts_to_population, propagate_patients_to_cohort,
@@ -176,16 +175,6 @@ class HierarchicalCoordinator:
                 self.replay_buffer.fill_from(loader, self.label_fn)
                 if len(self.replay_buffer.items) >= self.replay_buffer.capacity:
                     break
-
-    def _make_template_with_population_adapter(self) -> TFNDownstreamClassifier:
-        tmpl = copy.deepcopy(self.population_clf)
-        if self.population_adapter_state is not None:
-            # Population adapter lives in the same slot ("cohort_adapter") for arch reuse,
-            # but conceptually it's the slow global. The cohort adapter then sits on top of it
-            # — but the FFNAdapter machinery only has one slot of that name. Workaround:
-            # the population_adapter_state is BLENDED into the cohort init (see step 5).
-            pass
-        return tmpl
 
     def _refresh_cohort_from_population(self) -> None:
         """Top-down step: re-init cohorts using population state as starting point."""

@@ -38,7 +38,6 @@ the wrong tensors together rather than raise. Every conversion here goes through
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Callable
 
 import numpy as np
 import torch

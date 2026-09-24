@@ -21,7 +21,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..models.classifier import TFNDownstreamClassifier
-from .loop import make_input_only_classifier
 
 
 # --- EWC ---------------------------------------------------------------------

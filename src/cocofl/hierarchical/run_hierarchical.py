@@ -36,12 +36,12 @@ from ..constants import STATIC_DATA_FN
 from ..data.static_features import build_static_arrays
 from ..models.classifier import TFNDownstreamClassifier
 from ..models.backbone import TFNFullModel
-from ..adapters import attach_ffn_adapter, load_adapter_state_dict, load_level_state_dict
+from ..adapters import attach_ffn_adapter, load_level_state_dict
 from ..evaluation.batching import make_eval_loader, make_train_loader
 from ..personalisation.evaluate import eval_auc
 from ..personalisation.loop import per_patient_subsets, split_indices_by_time
 from ..personalisation.run_ablation import (
-    POSITIVE_TOKENS, TASKS, make_collate, make_label_fn,
+    TASKS, make_collate, make_label_fn,
 )
 from ..vocabulary import Vocabulary
 from ..federated.hospital_split import dirichlet_split_patients, summarize_split

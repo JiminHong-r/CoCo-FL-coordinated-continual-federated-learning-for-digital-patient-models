@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import random
 
-import pytest
 
 
 def _split_like_harness(indices, seed=42, frac_eval=0.3):

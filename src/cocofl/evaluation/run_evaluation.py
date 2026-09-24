@@ -37,8 +37,6 @@ import numpy as np
 import pandas as pd
 import torch
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader, Subset
-
 from ..constants import STATIC_DATA_FN, horizon_microseconds
 from ..utils import dump_config
 from ..data.static_features import build_static_arrays
@@ -47,7 +45,7 @@ from ..hierarchical.coordinator import CoordinatorConfig, HierarchicalCoordinato
 from ..hierarchical.patient import PatientConfig
 from ..hierarchical.run_hierarchical import (
     build_hospital_train_loader, build_patient_streams,
-    build_population_classifier, evaluate_with_states,
+    build_population_classifier,
 )
 from ..adapters import attach_ffn_adapter, load_level_state_dict
 from .batching import make_eval_loader

@@ -34,7 +34,6 @@ from cocofl.federated.fixed_splits import load_split
 from cocofl.federated.hospital_split import (
     HospitalSplit,
     dirichlet_split_patients,
-    summarize_split,
 )
 from cocofl.personalisation.run_ablation import POSITIVE_TOKENS, TASKS
 

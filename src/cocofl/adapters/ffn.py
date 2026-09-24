@@ -13,7 +13,6 @@ Learning for NLP", ICML 2019) recipe.
 """
 from __future__ import annotations
 
-from typing import Iterable
 
 import torch
 import torch.nn as nn

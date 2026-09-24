@@ -16,7 +16,6 @@ Two properties carry the correctness:
 """
 from __future__ import annotations
 
-import torch
 
 from cocofl.evaluation.batching import (
     ShuffledLengthBucketBatchSampler, make_train_loader, sequence_lengths,
