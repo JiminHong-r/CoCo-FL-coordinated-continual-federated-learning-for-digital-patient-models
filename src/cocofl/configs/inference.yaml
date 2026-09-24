@@ -1,0 +1,18 @@
+# Config for the WP4/WP5 evaluation harness (`cocofl_evaluate`). Every knob the
+# reported grid sets is passed on the command line by scripts/wp5_common.sh;
+# what remains here is the base the harness needs to start.
+model_path: null
+input_dir: ???
+output_dir: "results"
+
+device: "cuda" # "cuda" or "cpu"
+
+# Fixes the DATA: Dirichlet partition, balanced-sampling draw, dataloader order.
+# `run_seed` (set by the runner) fixes TRAINING, i.e. adapter initialisation.
+seed: 42
+
+hydra:
+  # The harness writes the fully resolved config to <output_dir>/config.yaml
+  # instead, so it sits beside the results it produced rather than in a
+  # timestamped Hydra directory nothing else points at.
+  output_subdir: null

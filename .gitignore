@@ -1,0 +1,51 @@
+# --- Credentialed data (PhysioNet DUA: never commit) -------------------------
+# MIMIC-IV derived tables contain subject_id/hadm_id/stay_id level records.
+src/cocofl/preprocess/maps/mimic-iv_derived.csv.gz
+# Leading slash: the extract directory at the repo root ONLY. An unanchored
+# `data/` also matched src/cocofl/data/ — the dataset-loading package — so the
+# loaders every entrypoint imports were silently absent from the repo.
+/data/
+*.parquet
+
+# --- Model checkpoints & run artifacts ---------------------------------------
+*.pt
+*.pth
+*.ckpt
+wp2_artifacts/
+wp2_artifacts_tfn/
+wp3_artifacts/
+wp4_artifacts/
+results_for_presentation/
+*.log
+
+# --- Notebooks ---------------------------------------------------------------
+# Exploratory/label-dump notebooks are development history. figures.ipynb is
+# kept for the figure definitions it carries (figure3, figure5, ethos_*), but
+# it does NOT run against this package: every notebook here still imports the
+# upstream `ethos.*` modules this fork renamed, and `ethos.tfn` has no
+# equivalent at all. Treat it as a record of how the figures were made.
+notebooks/*
+!notebooks/figures.ipynb
+
+# --- Documents (local only) --------------------------------------------------
+*.pdf
+CoCoFL_report/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- Editor / tooling --------------------------------------------------------
+*.code-workspace
+.vscode/
+.idea/
+.DS_Store
