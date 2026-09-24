@@ -1,7 +1,7 @@
 #!/bin/bash
 # End-to-end WP5 smoke test: all five methods, tiny budget, one cell.
 #
-# WHY: a full cell is ~10 h. This proves the whole pipeline completes and that
+# WHY: a full cell is 17-24 h. This proves the whole pipeline completes and that
 # every column the TD's axes require is actually POPULATED — not merely present
 # in the header. Several axes were silently blank for weeks (delta_cohort,
 # n_eval_windows on ablation runs, the population trajectory), and a header with

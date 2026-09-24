@@ -171,33 +171,31 @@ bash scripts/run_population_baseline.sh
 #    them in sequence on one GPU and retries a cell that lost to a transient
 #    OOM. `0` = do not wait for another pid first.
 GPU=0 bash scripts/v9_queue2.sh 0 0 \
-  v10flw:classaware:hospital_mortality:0.1:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:hospital_mortality:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:hospital_mortality:1.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:hospital_mortality:10.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:readmission:0.1:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:readmission:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:readmission:1.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:readmission:10.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:icu_admission:0.1:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:icu_admission:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:icu_admission:1.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
-  v10flw:classaware:icu_admission:10.0:USE_FLOWER=true,SEED=42,RUN_SEED=42
-# -> results_v10flw_<split>_<task>_a<alpha>/wp5_results.csv  (one per cell)
+  v11full:classaware:hospital_mortality:0.1:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:hospital_mortality:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:hospital_mortality:1.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:hospital_mortality:10.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:readmission:0.1:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:readmission:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:readmission:1.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:readmission:10.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:icu_admission:0.1:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:icu_admission:0.5:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:icu_admission:1.0:USE_FLOWER=true,SEED=42,RUN_SEED=42 \
+  v11full:classaware:icu_admission:10.0:USE_FLOWER=true,SEED=42,RUN_SEED=42
+# -> results_v11full_<split>_<task>_a<alpha>/wp5_results.csv  (one per cell)
 
 # 7. cells -> reported tables
 python scripts/summarise_paired.py                    # paired deltas vs population_only
 python scripts/analyse_thresholds.py --csv <cell>/wp5_results.csv --out thresholds.md
-python scripts/heterogeneity_analysis.py results_v10flw_*   # between-centre variance
+python scripts/heterogeneity_analysis.py results_v11full_*   # between-centre variance
 python scripts/diagnose_patient_streams.py            # patient-evaluability table
 ```
 
 Two notes on the grid:
 
-- **The robustness grid** re-runs the same 12 cells at 8.75× the cohort budget
-  (`COHORT_STEPS=875`, i.e. 28,000 windows per centre per round instead of
-  3,200). Pass it through the queue's per-cell env field and give it its own
-  tag, so the two campaigns land in separate directories.
+- **Cohort budget.** Every cell trains 875 cohort steps (28,000 windows per
+  centre per round), the `COHORT_STEPS` default in `wp5_common.sh`.
 - **Do not mix Flower and non-Flower cells inside one grid.** Same arithmetic,
   different execution order, so results agree to within ±0.0008 rather than
   exactly. `wp5_common.sh` documents the other knobs that change a *method*
@@ -267,7 +265,7 @@ is not a byte-for-byte image of the reported environment — the table is.
 
 ## Validating the pipeline without running a full grid
 
-A full cell is about 10 hours. Two smoke runs exercise the whole path at a tiny
+A full cell is 17 to 24 hours. Two smoke runs exercise the whole path at a tiny
 budget and assert that every reported column is actually populated, rather than
 merely present in the header:
 

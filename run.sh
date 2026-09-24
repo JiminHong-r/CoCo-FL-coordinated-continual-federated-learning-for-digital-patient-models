@@ -25,7 +25,7 @@ COHORT="${COHORT:-$PROJECT/data/tokenized/mimic_train}"
 SPLITS="${SPLITS:-$PROJECT/data/federated_splits_v2}"
 SPLITS_CA="${SPLITS_CA:-$PROJECT/data/federated_splits_v2_classaware}"
 POP_OUT="${POP_OUT:-$PROJECT/models/population_reserve_nonotes_full}"
-TAG="${TAG:-v10flw}"
+TAG="${TAG:-v11full}"
 ALPHAS="${ALPHAS:-0.1 0.5 1.0 10.0}"
 TASKS="${TASKS:-hospital_mortality readmission icu_admission}"
 

@@ -1449,8 +1449,7 @@ def main(cfg: DictConfig):
                 "cfg_seed": seed,
                 "cfg_run_seed": run_seed,
                 "cfg_rounds": getattr(cfg, "rounds", None),
-                "cfg_cohort_local_steps": getattr(
-                    getattr(cfg, "cohort", None), "local_steps", None),
+                "cfg_cohort_local_steps": cohort_local_steps,
                 "cfg_val_probe_frac": getattr(cfg, "val_probe_frac", None),
                 "cfg_val_target_pos": getattr(cfg, "val_target_pos", None),
                 "cfg_patient_weighting": patient_weighting_scheme,

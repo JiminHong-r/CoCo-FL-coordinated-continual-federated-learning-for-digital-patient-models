@@ -46,7 +46,9 @@ wp5_args () {
     +max_rounds=${MAX_ROUNDS:-5} +patience=999 +min_rounds=${MAX_ROUNDS:-5}
 
     # --- cohort level ---------------------------------------------------------
-    +cohort_local_steps=${COHORT_STEPS:-100}
+    # 875 steps x batch 32 = 28,000 windows per centre per round (the reported
+    # budget). The earlier 100-step (3,200-window) grid is retired.
+    +cohort_local_steps=${COHORT_STEPS:-875}
     +cohort_batch_size=${COHORT_BATCH:-32}
     +cohort_bottleneck=${COHORT_BOTTLENECK:-64}
     +cohort_lr=${COHORT_LR:-1e-3}

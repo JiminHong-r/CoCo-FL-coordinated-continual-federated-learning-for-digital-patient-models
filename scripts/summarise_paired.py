@@ -64,7 +64,7 @@ def verdict(cell: str, metric: str, n: int) -> dict | None:
 
 
 def short(cell: str) -> str:
-    return (cell.replace("results_v10flw", "").replace("results_v9", "")
+    return (cell.replace("results_v11full", "")
                 .replace("_classaware_", " CA ")
                 .replace("_random_", " RD ")
                 .replace("hospital_mortality", "mort")
@@ -79,7 +79,7 @@ def main() -> None:
     # only ever describe the run it was written for; the reported grid has since
     # moved to the Flower campaign, and a second hardcoded pattern would leave the
     # same trap for the next one.
-    ap.add_argument("--glob", default="results_v10flw*",
+    ap.add_argument("--glob", default="results_v11full*",
                     help="cell-directory glob (default: the reported Flower grid)")
     args = ap.parse_args()
 
