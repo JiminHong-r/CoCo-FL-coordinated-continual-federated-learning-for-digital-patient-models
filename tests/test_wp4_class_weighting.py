@@ -1,15 +1,10 @@
-"""Adaptation must not be trained with a loss that is degenerate at these prevalences.
+"""Adaptation must use a loss that works at these low prevalences.
 
-WP3 fits the population head with a class-weighted loss on a stratified draw
-(~20 % positives). WP4/WP5 then fine-tune that head — but did so with an
-UNWEIGHTED BCE on a centre's natural ~2 % prevalence, where the loss is
-minimised by drifting toward the base rate. The observable consequence was that
-every adapted method scored BELOW the frozen population model, and FedAvg —
-which averages three separately drifted heads — scored worst of all. That reads
-as "adaptation doesn't work" when it is really "the training objective is wrong".
-
-``pos_weight`` is applied at both cohort and patient level, and to every method,
-so the comparison stays symmetric.
+The population head is fitted with a class-weighted loss on a stratified draw (~20 %
+positives). Fine-tuning with unweighted BCE on a centre's natural ~2 % pulls it
+towards the base rate, which made every adapted method score below the frozen model.
+``pos_weight`` is applied at the cohort and patient level and for every method, so
+the comparison stays fair.
 """
 from __future__ import annotations
 
@@ -32,13 +27,13 @@ def test_configs_expose_pos_weight_defaulting_to_unweighted():
 
 
 def test_pos_weight_matches_measured_prevalence():
-    """mortality runs at ~2.09 %, so the positive class needs ~47x the weight."""
+    """Mortality runs at ~2.09 %, so positives need about 47 times the weight."""
     pw = _prevalence_to_pos_weight(0.0209)
     assert 46 < pw < 48
 
 
 def test_weighted_loss_penalises_missing_the_rare_class():
-    """The whole point: at 2 % prevalence, an all-negative predictor must not win."""
+    """At 2 % prevalence an all-negative predictor must not win."""
     y = torch.zeros(100)
     y[:2] = 1.0                      # 2 % positives
     always_negative = torch.full((100,), -5.0)
@@ -90,10 +85,7 @@ def test_harness_sets_the_weight_for_every_method():
 
 
 def test_fedavg_gets_the_same_regulariser_as_every_other_method():
-    """FedAvg used to ignore cl_strategy structurally — it was called without a
-    teacher, so 'hierarchical vs FedAvg' compared topology+distillation against
-    topology alone. That confound moved the result in BOTH directions depending
-    on whether the population head was random or trained."""
+    """With use_cl on, FedAvg must get the same distillation teacher as the other methods, so the comparison is about topology only."""
     import inspect
 
     from cocofl.evaluation.baselines import run_standard_fedavg
@@ -115,9 +107,7 @@ def test_fedavg_cl_defaults_on_so_the_comparison_is_symmetric():
 
 
 def test_balanced_cohort_sampling_matches_the_population_head_procedure():
-    """The population head was fitted on a class-stratified draw; adaptation
-    sampled naturally. Same imbalance handling must apply at both levels or the
-    comparison is between training procedures, not methods."""
+    """Cohort training must handle imbalance the same way the population head was fitted (stratified draw), or the comparison is between training procedures, not methods."""
     import numpy as np
 
     from cocofl.downstream.probe import stratified_subsample
@@ -136,15 +126,14 @@ def test_balanced_cohort_sampling_matches_the_population_head_procedure():
 
 
 def test_balanced_sampling_recomputes_pos_weight():
-    """Applying pos_weight from the NATURAL rate on top of a balanced draw would
-    double-correct; the harness must derive it from the resampled draw."""
+    """With a balanced draw, pos_weight must come from the resampled draw; using the natural rate would correct twice."""
     import inspect
 
     import cocofl.evaluation.run_evaluation as r
 
     src = inspect.getsource(r)
     assert "cohort_balanced_sampling" in src
-    # pos_weight is re-derived inside the balanced branch, not reused.
+    # pos_weight is recomputed inside the balanced branch, not reused.
     assert src.count("coord_cfg_template.cohort_cfg.pos_weight") >= 2, (
         "pos_weight must be recomputed after resampling"
     )

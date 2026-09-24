@@ -1,30 +1,18 @@
-"""Length-bucketed batching for downstream evaluation.
+"""Length-bucketed batching for evaluation and training.
 
-Why this exists
----------------
-The WP4/WP5 harness evaluated everything at ``batch_size=1``. The backbone is a
-T-LSTM: a 2048-step *sequential* recurrence, so a single sequence leaves the GPU
-almost entirely idle. Measured cost was ~0.22-0.36 s per window, which is what
-forced ``eval_per_hospital=150`` (≈1.2 % of each hospital's test partition) and
-made the reported AUROCs small-sample noisy.
+The backbone is a T-LSTM, a 2048-step sequential recurrence, so running one sequence
+at a time leaves the GPU mostly idle (about 0.2-0.4 s per window). That made
+full-size evaluation too slow.
 
-Why not just pad
-----------------
-``InferenceDataset.__getitem__`` returns ``context ++ timeline`` where the
-timeline is ``min(patient_history, timeline_size)`` tokens — so sequences are
-**variable length** and ``make_collate``'s ``torch.stack`` only works because
-the batch size is 1. Left-padding would let us stack, but the T-LSTM recurrence
-starts from a zero state and would then consume the pad prefix, perturbing the
-cell state before the real tokens begin. That silently changes every number.
+Padding is not an option. Windows have different lengths (the timeline is
+``min(patient_history, timeline_size)`` tokens), and the T-LSTM would run through
+any padding before the real tokens, changing every result.
 
-So instead we bucket by **exact** sequence length: every batch is homogeneous,
-no padding is introduced, and each sequence's recurrence is bit-identical to
-what it was at ``batch_size=1`` (the batch dimension is independent in an LSTM).
-Where a length has fewer members than ``batch_size`` the batch is simply
-smaller, so the worst case degrades gracefully to the old behaviour.
-
-``TFNDownstreamClassifier`` pools ``hidden_states[:, -1, :]``, which stays the
-true final timestep for every row precisely because nothing is padded.
+So batches are grouped by exact sequence length. Nothing is padded, and each
+sequence's output is identical to a ``batch_size=1`` run (batch rows are independent
+in an LSTM). A length with fewer members than ``batch_size`` just gives a smaller
+batch. ``TFNDownstreamClassifier`` reads ``hidden_states[:, -1, :]``, which stays
+each row's true last step because nothing is padded.
 """
 from __future__ import annotations
 
@@ -35,23 +23,20 @@ from torch.utils.data import DataLoader, Subset
 
 
 def sequence_lengths(dataset, indices) -> torch.Tensor | None:
-    """Exact input length ``__getitem__`` would produce for each of ``indices``.
+    """The exact input length ``__getitem__`` would produce for each of ``indices``.
 
     Mirrors ``InferenceDataset.__getitem__``: the timeline is clipped to the
-    patient's own history and to ``timeline_size``, and a fixed-width static
-    context is prepended::
+    patient's own history and to ``timeline_size``, and a fixed-width static context
+    is added in front::
 
         len = context_size + min(start - patient_offset[start] + 1, timeline_size)
 
-    Returns ``None`` when the dataset does not expose the attributes needed to
-    compute this (callers then fall back to ``batch_size=1``), so an unfamiliar
-    dataset degrades to the old behaviour instead of producing wrong batches.
+    Returns ``None`` if the dataset lacks the needed attributes; callers then fall
+    back to ``batch_size=1``.
 
-    Cost note: on the sharded backend ``patient_offset_at_idx`` is not an array
-    but a lazy ``LookupData`` that runs a ``searchsorted`` per access. It must be
-    indexed with exactly the starts we need — coercing the whole object to a
-    tensor walks it element by element and takes the better part of an hour on
-    the MIMIC tree. Work stays O(len(indices)).
+    On the sharded backend ``patient_offset_at_idx`` is a lazy lookup, so index it
+    with only the starts needed. Turning the whole thing into a tensor takes close
+    to an hour on MIMIC.
     """
     try:
         start_indices = dataset.start_indices
@@ -74,11 +59,10 @@ def sequence_lengths(dataset, indices) -> torch.Tensor | None:
 
 
 class LengthBucketBatchSampler(torch.utils.data.Sampler):
-    """Yields batches whose members all share one exact sequence length.
+    """Batches whose members all have the same sequence length.
 
-    Deterministic: buckets are emitted in ascending length order and members
-    keep their original relative order, so a run is reproducible. AUROC/AUPRC/
-    ECE are order-invariant, so this does not affect any reported metric.
+    Deterministic: buckets come in ascending length order and members keep their
+    order. AUROC, AUPRC and ECE do not depend on order, so metrics are unaffected.
     """
 
     def __init__(self, lengths: torch.Tensor, batch_size: int):
@@ -99,19 +83,13 @@ class LengthBucketBatchSampler(torch.utils.data.Sampler):
 
 
 class ShuffledLengthBucketBatchSampler(torch.utils.data.Sampler):
-    """Length-homogeneous batches, reshuffled on every pass.
+    """Same-length batches, reshuffled on every pass (for training).
 
-    ``LengthBucketBatchSampler`` is deliberately deterministic because the
-    metrics it feeds are order-invariant. Training is not: the optimiser needs a
-    different order each round, and it matters more than usual here because
-    ``CohortConfig.local_steps_per_epoch`` truncates the loader after N batches.
-    Under the deterministic sampler that truncation would hand every round the
-    same prefix — the shortest sequences in the partition — and the centre would
-    never train on anything else.
-
-    Batches stay exact-length homogeneous, so nothing is padded into the T-LSTM
-    recurrence; only the members within a length bucket and the order of the
-    batches are permuted.
+    Training needs a new order each round. It matters here because
+    ``CohortConfig.local_steps_per_epoch`` stops the loader after N batches: with a
+    fixed order every round would get the same first batches (the shortest
+    sequences). Only the order of members within a bucket and the order of batches
+    change; nothing is padded.
     """
 
     def __init__(self, lengths: torch.Tensor, batch_size: int, seed: int = 42):
@@ -144,15 +122,12 @@ def make_train_loader(dataset, indices, collate_fn, batch_size: int = 1,
                       seed: int = 42) -> DataLoader:
     """Shuffled training DataLoader over ``Subset(dataset, indices)``.
 
-    With ``batch_size <= 1`` (or a dataset whose lengths cannot be derived) this
-    is exactly the plain shuffled ``batch_size=1`` loader the harness used
-    before. Above that it batches within equal-length buckets, which is what
-    makes training on a full hospital partition affordable — a 2048-step T-LSTM
-    recurrence run one sequence at a time leaves the GPU almost entirely idle.
+    With ``batch_size <= 1`` (or when lengths cannot be derived) this is a plain
+    shuffled batch-1 loader. Otherwise it batches within same-length buckets, which
+    makes training on a full partition affordable.
 
-    Note the unit change this implies upstream: ``local_steps_per_epoch`` counts
-    optimiser steps, so at batch B a centre sees ``steps * B`` windows per round
-    rather than ``steps``.
+    ``local_steps_per_epoch`` counts optimiser steps, so at batch B a centre sees
+    ``steps * B`` windows per round.
     """
     indices = list(indices)
     subset = Subset(dataset, indices)
@@ -169,12 +144,11 @@ def make_train_loader(dataset, indices, collate_fn, batch_size: int = 1,
 
 
 def make_eval_loader(dataset, indices, collate_fn, batch_size: int = 1) -> DataLoader:
-    """Eval DataLoader over ``Subset(dataset, indices)``.
+    """Evaluation DataLoader over ``Subset(dataset, indices)``.
 
-    With ``batch_size <= 1`` (or a dataset whose lengths cannot be derived) this
-    is exactly the plain ``batch_size=1`` loader the harness used before.
-    Otherwise it batches within equal-length buckets — same predictions, fewer
-    kernel launches.
+    With ``batch_size <= 1`` (or when lengths cannot be derived) this is a plain
+    batch-1 loader. Otherwise it batches within same-length buckets: same
+    predictions, faster.
     """
     indices = list(indices)
     subset = Subset(dataset, indices)

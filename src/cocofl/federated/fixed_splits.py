@@ -1,7 +1,6 @@
-"""Load pre-computed federated splits (Spec WP2 task 4).
+"""Load the pre-computed federated splits (WP2 task 4).
 
-Pairs with ``scripts/build_split_v2.py`` which writes one JSON file
-per α value:
+``scripts/build_split_v2.py`` writes one JSON file per alpha::
 
     {
       "alpha": 0.1,
@@ -10,9 +9,8 @@ per α value:
       ...
     }
 
-Loading these instead of re-running the Dirichlet draw guarantees every
-experiment (population baseline, federated, hierarchical, evaluation harness)
-operates on identical patient sets and respects the no-leakage constraint.
+Loading these instead of redrawing the Dirichlet split means every experiment uses
+exactly the same patients, with no leakage.
 """
 from __future__ import annotations
 
@@ -23,10 +21,9 @@ from .hospital_split import HospitalSplit
 
 
 def load_split(splits_dir: Path | str, alpha: float) -> dict:
-    """Load the raw JSON for the given α.
+    """Load the raw JSON for the given alpha.
 
-    Returns the parsed dict; downstream code calls
-    :func:`as_hospital_split` if it needs the ``HospitalSplit`` object.
+    Call :func:`as_hospital_split` on the result to get a ``HospitalSplit``.
     """
     splits_dir = Path(splits_dir)
     candidates = [
@@ -45,12 +42,11 @@ def load_split(splits_dir: Path | str, alpha: float) -> dict:
 
 
 def as_hospital_split(split_json: dict, partition: str = "train") -> HospitalSplit:
-    """Materialise a :class:`HospitalSplit` for the given partition.
+    """Build a :class:`HospitalSplit` for one partition.
 
-    Use ``partition="train"`` for federated training, ``"val"`` for tuning, and
-    ``"test"`` for held-out evaluation. The returned split has
-    ``pids_per_hospital`` populated; the caller still calls
-    ``bind_to_dataset(dataset)`` to map patient IDs to dataset indices.
+    ``partition`` is ``"train"`` (training), ``"val"`` (selection) or ``"test"``
+    (evaluation). The result has ``pids_per_hospital`` filled; call
+    ``bind_to_dataset(dataset)`` to map patient ids to dataset indices.
     """
     if partition not in ("train", "val", "test"):
         raise ValueError(f"partition must be train/val/test, got {partition!r}")

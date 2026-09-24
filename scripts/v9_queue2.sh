@@ -1,21 +1,14 @@
 #!/bin/bash
-# Wait for a running pid, then run cells on one GPU — with a retry pass.
+# Wait for a running process to finish, then run cells one after another on one GPU,
+# retrying failed cells once at the end.
 #
-#   bash scripts/v9_queue2.sh <gpu> <wait_pid> <tag:split:task:alpha[:VAR=val,...]> ...
+# bash scripts/v9_queue2.sh <gpu> <wait_pid> <tag:split:task:alpha[:VAR=val,...]>
+# ...
 #
-# WHY THIS EXISTS
-# ---------------------------------------
-# The GPU is shared. `class-aware readmission α=10.0` ran for four hours and died
-# with a CUDA OOM when another user's job expanded onto the card — and because the
-# previous runner had no retry, the queue simply moved on and that cell went
-# missing from the grid. A transient failure caused by someone else's allocation is
-# the most likely failure mode here and the most recoverable, so it gets one retry
-# at the end rather than silently costing a cell.
-#
-# The pre-flight VRAM gate in run_wp5_cell.sh only checks memory at START; nothing
-# can protect a 19-hour cell from a mid-run spike. Lowering EVAL_BATCH_SIZE for the
-# retry reduces peak footprint. Eval batching changes memory and speed only, never
-# per-window predictions, so a retried cell stays comparable to the rest.
+# The GPU is shared, so the most likely failure is an out-of-memory error caused by
+# someone else's job. That is usually fine a few hours later, so each failed cell
+# gets one retry with a smaller eval batch. The eval batch changes only memory use
+# and speed, not predictions, so a retried cell stays comparable.
 set -u
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 GPU=${1:?gpu}; WAITPID=${2:?pid to wait for}; shift 2
@@ -58,8 +51,7 @@ for spec in "$@"; do
   fi
 done
 
-# One retry pass, at a smaller eval batch. A cell that lost to a transient
-# allocation is usually recoverable hours later on a quieter card.
+# Retry pass at a smaller eval batch.
 if [ ${#failed[@]} -gt 0 ]; then
   echo "[$(date)] gpu=$GPU RETRY PASS for: ${failed[*]}"
   for spec in "${failed[@]}"; do

@@ -1,12 +1,9 @@
 """Patient rotation across rounds.
 
-Without it the coordinator takes ``patient_streams[:patients_per_round]`` every
-round, so any patient past that prefix is built and never trained on, and the
-upward patient->cohort path sees one fixed group repeatedly. Rotation walks a
-window through the whole list at identical per-round cost.
-
-Off by default: this changes the method, so v5-comparable runs must not get it
-for free.
+Without rotation the coordinator uses ``patient_streams[:patients_per_round]`` every
+round, so later patients are never trained on and the same group feeds the cohort
+each time. Rotation moves a window through the whole list at the same cost per
+round. Off by default, because it changes the method.
 """
 from __future__ import annotations
 
@@ -14,8 +11,7 @@ from cocofl.hierarchical.coordinator import CoordinatorConfig, HierarchicalCoord
 
 
 class FakeCoordinator:
-    """Exercises the selection logic alone — building a real coordinator needs a
-    backbone and loaders, none of which the selection depends on."""
+    """Tests the selection logic alone; a real coordinator needs a backbone and loaders, which the selection does not use."""
 
     def __init__(self, patients_per_round, rotation, n_streams):
         self.cfg = CoordinatorConfig(
@@ -50,8 +46,7 @@ def test_rotation_wraps_and_keeps_the_round_size_constant():
 
 
 def test_rotation_covers_more_patients_than_the_prefix():
-    """The reason to enable it: 5 rounds x 20 over 50 streams reaches all 50
-    patients, the fixed prefix reaches 20."""
+    """5 rounds x 20 patients over 50 streams reaches all 50 patients; the fixed prefix reaches 20."""
     fixed = FakeCoordinator(patients_per_round=20, rotation=False, n_streams=50)
     rotating = FakeCoordinator(patients_per_round=20, rotation=True, n_streams=50)
     seen_fixed = {p for _ in range(5) for p in fixed.round()}

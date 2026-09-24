@@ -1,30 +1,20 @@
-"""Spec WP5 axis 2: for which patient subgroups is personalisation beneficial?
+"""WP5 axis 2: for which patients, and when, does personalisation help?
 
-WHY THIS IS PER-PATIENT NOW
----------------------------
-The earlier version aggregated at the hospital-cohort level and said so in its own
-docstring: the results CSV carries MACRO rows per (task, alpha, hospital), not per
-patient, so "which subgroups benefit" had to be approximated by "which centres,
-tagged by their dominant demographic, benefit". With three centres that is twelve
-rows, and it answers a different question from the one the spec asks.
+``patient_records.csv`` has one row per patient the patient layer ran on, with
+``val_auroc_patient`` and ``val_auroc_cohort``. This joins each patient to their
+demographics and groups them. It also groups by the conditions of the run (fitting
+data, evaluation evidence, alpha, task), which answer the "when" part.
 
-``patient_records.csv`` now exists — one row per patient the patient layer ran on,
-carrying ``val_auroc_patient`` and ``val_auroc_cohort`` — so the axis can be
-answered directly: join each patient to their demographics and group.
+Age is the main grouping (the class-aware split is by age). Across the whole cohort
+only ~69 % of patients have a usable birth record, but every patient the patient
+layer ran on has one, so coverage is 100 % here. Gender and race are known for
+everyone. Coverage is printed for each grouping.
 
-CHOOSING THE GROUPING VARIABLE
-------------------------------
-Age is the natural choice and is what the class-aware split partitions on. Across
-the whole cohort it is derivable for only ~69% of patients (100,613 of 328,164 have
-no usable birth anchor), which is why the earlier hospital-level version collapsed
-into an "unknown" bucket. That does not bite here: every patient the patient layer
-actually ran on has a derivable age, so coverage is 100% on the rows being grouped.
-Gender and race are coded for all patients. All three are reported with coverage
-stated, so it is visible which grouping a conclusion rests on.
+::
 
-    python scripts/subgroup_analysis.py \
-        --records "results_v9_classaware_*/patient_records.csv" \
-        --static-pickle data/tokenized/mimic_train/static_data.pickle \
+    python scripts/subgroup_analysis.py \\
+        --records "results_v11full_classaware_*/patient_records.csv" \\
+        --static-pickle data/tokenized/mimic_train/static_data.pickle \\
         --out axis2_subgroups.md
 """
 from __future__ import annotations
@@ -48,9 +38,9 @@ def demographics(static_data: dict) -> pd.DataFrame:
 
         birth_times = data.get("MEDS_BIRTH", {}).get("time") or [None]
         birth = birth_times[0]
-        # Anchor on the earliest NON-birth event, as ``build_age_class_labels`` in
-        # build_split_v2.py does. Anchoring on a BMI timestamp drops every patient
-        # without a BMI record; including MEDS_BIRTH itself makes every age zero.
+        # Age from the earliest non-birth event, as
+        # build_split_v2.build_age_class_labels does. Using a BMI time would drop
+        # patients without BMI; using MEDS_BIRTH itself would make every age zero.
         times = [t for k, v in data.items()
                  if k != "MEDS_BIRTH" and isinstance(v, dict)
                  for t in (v.get("time") or []) if t is not None]
@@ -113,11 +103,7 @@ def main() -> None:
         ).round(3).sort_values("n", ascending=False)
         lines.append(agg.reset_index().to_markdown(index=False))
 
-    # ---- the "when" half of the axis ---------------------------------------
-    # The spec asks for "WHEN and for which patient subgroups personalisation is
-    # most beneficial". Demographics answer "for whom"; these answer "when" — the
-    # data conditions under which the patient layer pays, which is a different
-    # question and, for this result, the more informative one.
+    # The "when" part: the data conditions under which the patient layer pays off.
     if not ev.empty:
         lines.append("\n## When: by amount of fitting data (`n_fit` quartile)\n")
         q = ev.copy()

@@ -1,54 +1,35 @@
-"""Do centres disagree about how features map to risk? (concept shift, feature space)
+"""Do centres disagree about how features map to risk? (concept shift in feature space)
 
-WHY THIS EXISTS
----------------
-`heterogeneity_analysis.py` finds no exploitable per-centre structure, but it tests
-a two-parameter family — `sigma(a * logit(score) + b)` — a monotone reshaping of the
-population model's final SCORE. A cohort adapter is more expressive: it transforms
-the whole final hidden state before a frozen head, so it can rotate the
-representation and change what the head's fixed direction reads. The score-space
-null therefore bounds its own claim, and this closes the gap at full
-representational resolution.
+``heterogeneity_analysis.py`` tests a two-parameter reshaping of the population
+model's final score. A cohort adapter can do more: it transforms the whole final
+hidden state before a frozen head. This test works at that resolution.
 
-WHAT CHANGED FROM THE EARLIER VERSION, AND WHY
-----------------------------------------------
-An earlier version of this script compared each centre's head against a **pooled**
-head fitted on features concatenated across centres. That comparator is not
-admissible here: pooling raw features across centres is precisely what the
-federated setting forbids, so it measured the architecture against a baseline the
-premise does not permit. Whatever it found could not license a claim about a
-federated system, and both the experiment and the conclusion drawn from it were
-withdrawn (see RESULTS.md, §1d).
-
-This version has no pooled comparator. Every head is fitted on ONE centre's data
-and evaluated on every centre's test partition:
+No data is pooled across centres. Each head is fitted on one centre's frozen
+features and evaluated on every centre's test partition::
 
               tested on h0   tested on h1   tested on h2
     head h0       AUROC          AUROC          AUROC
     head h1       ...
     head h2       ...
 
-The readout is the DIAGONAL against the OFF-DIAGONAL. If a centre's own head beats
-the best head trained elsewhere, the centres disagree about how features map to
-risk — concept shift, and a genuine target for personalisation. If the diagonal is
-level with the off-diagonal, the conditional law is shared at the resolution the
-adapter operates on, and the score-space null of §1d extends to feature space.
+Compare the diagonal with the off-diagonal. If a centre's own head beats the best
+head trained elsewhere, the centres disagree about how features map to risk, which
+personalisation could exploit. If not, they share the same conditional law at the
+adapter's resolution. The only thing crossing a centre boundary is a fitted head
+being evaluated, which is a measurement, not training.
 
-Nothing here crosses a centre boundary except a fitted head being *evaluated*
-elsewhere, which is a measurement, not a training signal.
+Every head is fitted on the same number of windows, with the same stratification.
+Centres differ hugely in size (at alpha=0.1, ~28,000 windows in one and ~500 in
+another), and a head fitted on more data would win for that reason alone. (An
+earlier version compared against a head fitted on features pooled across centres;
+pooling is not allowed in a federated setting, so that comparison was dropped.)
 
-SIZE MATCHING IS THE POINT, NOT A DETAIL
-----------------------------------------
-Centres differ enormously in size (alpha=0.1 puts ~28,000 windows in one and ~500
-in another). A head fitted on more data wins for reasons unrelated to concept
-shift, so an unmatched diagonal advantage would be unreadable. Every centre's head
-is therefore fitted on the SAME number of windows with the same stratification, so
-a surviving diagonal advantage is about the *mapping*, not the sample size.
+::
 
-    python scripts/cross_centre_transfer.py \
-        --test-dir   data/tokenized/mimic_train \
-        --model-path models/population_reserve_nonotes_full/best_model.pt \
-        --splits-dir data/federated_splits_v2_classaware \
+    python scripts/cross_centre_transfer.py \\
+        --test-dir   data/tokenized/mimic_train \\
+        --model-path models/population_reserve_nonotes_full/best_model.pt \\
+        --splits-dir data/federated_splits_v2_classaware \\
         --task hospital_mortality --alpha 0.5
 """
 from __future__ import annotations
@@ -108,8 +89,7 @@ def main() -> None:
     cat, num = build_static_arrays(static)
 
     ds = TASKS[args.task](test_dir)
-    # Rebuild collate WITH the dataset so the T-LSTM receives real inter-event
-    # times; a constant would run the backbone outside its training distribution.
+    # Build the collate with the dataset so the T-LSTM gets real time gaps.
     collate = make_collate(cat, num, dataset=ds)
     y_all = window_labels(ds, POSITIVE_TOKENS[args.task],
                           horizon_microseconds(args.task))

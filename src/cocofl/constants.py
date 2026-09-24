@@ -12,11 +12,11 @@ class SpecialToken(StrEnum):
     DEATH = "MEDS_DEATH"
     TIMELINE_END = "TIMELINE_END"
 
-    # hospital adm and dc
+    # Hospital admission and discharge
     ADMISSION = "HOSPITAL_ADMISSION"
     DISCHARGE = "HOSPITAL_DISCHARGE"
 
-    # only MIMIC
+    # MIMIC only
     ICU_ADMISSION = "ICU_ADMISSION"
     ICU_DISCHARGE = "ICU_DISCHARGE"
     ED_ADMISSION = "ED_REGISTRATION"
@@ -27,26 +27,19 @@ class SpecialToken(StrEnum):
 STATIC_DATA_FN = "static_data.pickle"
 
 
-# ---- Time-bounded downstream labels ----------------------------------------
-# A task listed here is POSITIVE only when its outcome token occurs within the
-# horizon of the prediction point; a qualifying event *beyond* the horizon is a
-# NEGATIVE. Tasks absent from this mapping stay unbounded ("the next qualifying
-# event, whenever it happens").
+# Time-limited labels. A task listed here is positive only if its outcome happens
+# within the horizon of the prediction point; a later event counts as negative.
+# Tasks not listed use the next qualifying event, whenever it happens.
 #
-# ``readmission`` is bounded to 30 days so it matches the standard clinical
-# definition of 30-day hospital readmission rather than "re-admitted ever".
-#
-# Note this is only meaningful for tasks whose outcome search can actually run
-# past the horizon. ``hospital_mortality`` and ``icu_admission`` are already
-# bounded by the index stay (their outcome search terminates at the stay's
-# discharge), so adding them here would change little.
+# readmission uses 30 days, the standard clinical definition. hospital_mortality and
+# icu_admission are already limited by the current stay (their outcome search stops
+# at discharge), so they are not listed.
 TASK_HORIZONS: dict[str, timedelta] = {
     "readmission": timedelta(days=30),
 }
 
-# ``true_token_time`` on every InferenceDataset sample is
-# ``times[outcome_idx] - times[start_idx]`` in MICROSECONDS, so horizons are
-# compared in the same unit.
+# ``true_token_time`` on every InferenceDataset sample is ``times[outcome_idx] -
+# times[start_idx]`` in microseconds, so horizons use the same unit.
 MICROSECONDS_PER_SECOND = 1_000_000
 
 

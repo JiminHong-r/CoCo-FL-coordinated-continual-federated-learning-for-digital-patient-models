@@ -1,18 +1,10 @@
-"""Δ_patient must be a PAIRED difference on identical evaluation windows.
+"""Delta_patient must be a paired difference on the same evaluation windows.
 
-The TD defines Δ_patient = Perf_patient − Perf_cohort. As computed, the two terms
-came from different patient populations:
-
-  * ``patient_aucs[hid]``  — the patient model on the late windows of patients
-    drawn from the centre's **train** partition (necessarily so: you can only
-    build a patient model for a patient the centre has data for, and you can only
-    evaluate it on that patient's held-out windows);
-  * ``hier_res.aucs[hid]`` — the cohort model on the centre's **test** partition,
-    i.e. patients the centre never trained on.
-
-Subtracting those is not a personalisation gain, it is a population difference
-plus a personalisation gain, confounded. The fix scores the un-adapted starting
-model on the *same pooled patient windows* and differences against that.
+The TD defines Delta_patient = Perf_patient - Perf_cohort. Patient models can only
+be scored on train-partition patients (the centre must have their data), while the
+cohort model is scored on the test partition. Subtracting those mixes a difference
+between patient groups into the gain. So the un-adapted starting model is scored on
+the same pooled patient windows, and the difference is taken against that.
 """
 from __future__ import annotations
 
@@ -26,22 +18,19 @@ def paired_delta(patient_auc, cohort_on_same_windows):
 
 
 def unpaired_delta(patient_auc, cohort_on_test_partition):
-    """The old definition, kept only to demonstrate the difference."""
+    """The old definition, kept only to show the difference."""
     if patient_auc is None or cohort_on_test_partition is None:
         return None
     return float(patient_auc) - float(cohort_on_test_partition)
 
 
 def test_paired_delta_is_zero_when_no_adapter_is_accepted():
-    """With every adapter rejected, patients fall back to the cohort model, so the
-    two pooled scores are computed from IDENTICAL predictions and must cancel.
-    The unpaired version cannot express that."""
+    """If every adapter is rejected, patients fall back to the cohort model, so both pooled scores use identical predictions and must cancel."""
     assert paired_delta(0.7421, 0.7421) == 0.0
 
 
 def test_unpaired_delta_reports_a_spurious_gain_in_that_same_case():
-    """0/23 accepted on class-aware mortality, yet the old Δ_patient read +0.093
-    — entirely a population difference between train and test partitions."""
+    """The old definition reported +0.093 on class-aware mortality with 0 of 23 adapters accepted: purely a train/test population difference."""
     patient = cohort_same_windows = 0.7421
     cohort_on_test = 0.6943
     assert paired_delta(patient, cohort_same_windows) == 0.0
@@ -49,8 +38,7 @@ def test_unpaired_delta_reports_a_spurious_gain_in_that_same_case():
 
 
 def test_paired_delta_is_negative_when_adapters_hurt():
-    """Readmission: accepted adapters lost on held-out data. A paired comparison
-    shows that as a loss rather than hiding it behind a population shift."""
+    """When accepted adapters lose on held-out data, the paired difference shows a loss."""
     assert paired_delta(0.5536, 0.6100) < 0
 
 

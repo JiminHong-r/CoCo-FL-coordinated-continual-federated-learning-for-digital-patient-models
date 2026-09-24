@@ -1,10 +1,8 @@
 """Patient-stream construction: the fast paths must match the slow ones.
 
-``per_patient_subsets`` and ``split_indices_by_time`` used to materialise every
-window (a 2048-token tensor) just to read one field off its label dict. The
-harness calls the former once per hospital per α over a ~490 K-window dataset,
-so both now read the dataset's own arrays instead. These tests pin the
-equivalence, since a mismatch would silently regroup patients.
+``per_patient_subsets`` and ``split_indices_by_time`` now read the dataset's arrays
+instead of building a 2048-token window per index. These tests check both give the
+same result, since a mismatch would quietly regroup patients.
 """
 from __future__ import annotations
 
@@ -37,8 +35,7 @@ def setup_function():
 
 
 def test_grouping_does_not_walk_a_lazy_patient_id_lookup():
-    """``patient_id_at_idx`` is a lazy per-index lookup on the sharded backend;
-    grouping must index it once with the whole start-index tensor."""
+    """``patient_id_at_idx`` is a lazy lookup on the sharded backend; grouping must index it once with all the start indices."""
     from test_eval_batching import LazyLookup
 
     ds = FakeInferenceDataset()
@@ -93,10 +90,11 @@ def test_distinct_datasets_do_not_share_a_cache_entry():
 
 
 def test_array_path_keeps_indices_the_getitem_path_would_drop():
-    """Documents the one difference between the two paths: ``dataset[idx]``
-    swallows exceptions and drops the index, the array path cannot see them.
-    Harmless here because every other loader iterates the same indices through
-    ``__getitem__`` and would fail the run outright."""
+    """The one difference between the paths: ``dataset[idx]`` drops indices whose ``__getitem__`` raises, and the array path cannot see them.
+
+    Harmless here, because the other loaders read the same indices through
+    ``__getitem__`` and would fail the run anyway.
+    """
     ds = FakeInferenceDataset()
     original = FakeInferenceDataset.__getitem__
 
@@ -136,9 +134,7 @@ def test_fast_time_split_matches_the_original():
 
 
 def test_min_samples_four_yields_two_eval_windows():
-    """The reason Δ_patient is currently indefensible: at the default
-    min_samples=4 a qualifying patient contributes exactly 2 eval windows, so
-    their AUROC can only be 0, 0.5 or 1."""
+    """Why min_samples defaults to 60: at min_samples=4 a patient gets exactly 2 eval windows, so their AUROC can only be 0, 0.5 or 1."""
     ds = FakeInferenceDataset()
     ds.start_indices = torch.tensor([1, 2, 3, 4])  # one patient, 4 windows
     (early, late), = [

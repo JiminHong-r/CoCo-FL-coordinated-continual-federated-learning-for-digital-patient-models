@@ -1,21 +1,13 @@
-"""No function may reference a name it never binds.
+"""No function may use a name it never defines.
 
-This exists because of a real crash that 232 tests missed. A patch inserted a
-probe-evaluation block into ``run_standard_fedavg`` that referenced ``coord`` —
-a coordinator that function does not have, because flat FedAvg does not use one.
-It compiled, it imported, every unit test passed, and it died only when an
-end-to-end run reached that method:
+A patch once added a block referencing ``coord`` to ``run_standard_fedavg``, which
+has no coordinator. It compiled, imported and passed every unit test, then crashed
+with ``NameError`` in an end-to-end run. (An unguarded ``str.replace`` had inserted
+the block in two functions.)
 
-    NameError: name 'coord' is not defined   (baselines.py:544)
-
-The cause was an unguarded ``str.replace``, which replaces EVERY occurrence: the
-target text appeared in both ``_round_loop_with_early_stopping`` and
-``run_standard_fedavg``, so the coordinator-based block landed in both.
-
-Signature tests cannot catch this — the signature was fine, the body was not.
-This walks each function, collects everything it binds (arguments, assignments,
-imports, comprehension targets, except-handlers, walrus) and flags loads of
-anything else that is not a module-level or builtin name.
+This walks each function, collects every name it binds (arguments, assignments,
+imports, comprehension targets, except handlers, walrus) and flags any other name it
+reads that is not module-level or builtin.
 """
 from __future__ import annotations
 
@@ -79,10 +71,9 @@ def _bound_in(fn: ast.FunctionDef) -> set[str]:
         elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
             bound.add(node.target.id)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # A NESTED function contributes its own name AND its parameters to
-            # what is legitimately in scope inside this subtree — otherwise a
-            # helper like ``def _cap_str(n)`` reports its own parameter as
-            # undefined.
+            # A nested function adds its own name and its parameters to what is in
+            # scope inside it; otherwise a helper's own parameter would be reported
+            # as undefined.
             bound.add(node.name)
             bound |= _args_of(node)
         elif isinstance(node, ast.ClassDef):
@@ -118,7 +109,7 @@ def test_no_function_references_an_undefined_name(modname):
 
 
 def test_fedavg_does_not_reference_a_coordinator():
-    """The specific regression: flat FedAvg has no coordinator."""
+    """The specific regression: plain FedAvg has no coordinator."""
     from cocofl.evaluation import baselines
 
     src = inspect.getsource(baselines.run_standard_fedavg)

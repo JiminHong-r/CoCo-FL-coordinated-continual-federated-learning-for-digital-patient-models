@@ -1,12 +1,8 @@
-# Frozen from the environment that produced the reported results
-# (coco-fl GPU box, Python 3.12.3, `pip freeze`, 2026-09-23). The package
-# itself is installed separately, in editable mode, by container_bashrc.
+# Frozen from the environment that produced the reported results (coco-fl GPU
+# server, Python 3.12.3, `pip freeze`, 2026-09-23). The package itself is installed
+# separately, in editable mode, by container_bashrc.
 #
-# Regenerate with:  pip freeze | grep -v '^-e ' > docker/requirements.txt
-#
-# The previous snapshot predated the move to Flower: it pinned torch 2.6.0 and
-# carried no flwr at all, so an image built from it could not run the federated
-# path the reported grid was produced with.
+# Regenerate with: pip freeze | grep -v '^-e ' > docker/requirements.txt
 alembic==1.19.1
 annotated-doc==0.0.5
 annotated-types==0.7.0

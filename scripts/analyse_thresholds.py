@@ -1,15 +1,13 @@
-"""Spec WP5 axis 5: identify α thresholds beyond which methods degrade.
+"""WP5 axis 5: find alpha values beyond which methods get worse.
 
-For each (task, method) in a WP5 results CSV, fit AUROC(α) and report:
-  - best α
-  - worst α
-  - degradation_range = AUROC_max - AUROC_min
-  - 'cliff' = largest single-step drop as α decreases (heterogeneity rises)
+For each (task, method) in a WP5 results CSV, report the best alpha, the worst
+alpha, the range (AUROC max - min) and the "cliff" (the largest single drop as alpha
+decreases, i.e. as heterogeneity grows).
 
 Usage::
 
-    python scripts/analyse_thresholds.py --csv results_wp5_v2/wp5_results.csv \
-                                          --out results_wp5_v2/threshold_analysis.md
+    python scripts/analyse_thresholds.py --csv <cell>/wp5_results.csv \\
+                                          --out thresholds.md
 """
 from __future__ import annotations
 
@@ -39,9 +37,8 @@ def analyse_per_task(macro_df: pd.DataFrame) -> pd.DataFrame:
             worst_alpha = series.idxmin()
             best_auc = float(series.loc[best_alpha])
             worst_auc = float(series.loc[worst_alpha])
-            # Largest drop as α DECREASES (i.e., heterogeneity grows). The
-            # alphas are sorted ascending; we look at differences going
-            # from higher α to lower α.
+            # Largest drop as alpha decreases (heterogeneity grows): alphas are
+            # sorted from high to low and differences taken along that order.
             sorted_alphas = sorted(series.index, reverse=True)
             cliff = 0.0
             cliff_at = None

@@ -1,11 +1,11 @@
-"""Full TFN model adapted for ETHOS token sequences.
+"""The full TFN model, adapted to ETHOS token sequences.
 
-Approach: keep TFN's MultiModal architecture verbatim (StaticEncoder, TimeAwareLSTM,
-TimeAwareAttentionEncoder, fusion layer). Adapt for token input by:
-  1. Embedding tokens before passing them to the LSTM encoder
-  2. Replacing the TS-reconstruction head with a vocab LM head
+TFN's multimodal architecture (StaticEncoder, TimeAwareLSTM,
+TimeAwareAttentionEncoder, fusion layer) is kept as is. For token input it adds a
+token embedding before the LSTM encoder and replaces the time-series reconstruction
+head with a vocabulary LM head.
 
-Source: TFN_Temporal-Fusion-Nexus/src/models.py (Baytas et al. T-LSTM paper)
+Source: TFN_Temporal-Fusion-Nexus/src/models.py (T-LSTM from Baytas et al.).
 """
 from types import SimpleNamespace
 from typing import Optional
@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# TFN CONFIG values used verbatim from TFN_Temporal-Fusion-Nexus/src/config.py
+# TFN CONFIG values, copied from TFN_Temporal-Fusion-Nexus/src/config.py
 TFN_HIDDEN = 512
 TFN_LAYERS = 2
 TFN_NUM_HEADS = 2
@@ -103,7 +103,7 @@ class TimeAwareLSTM(nn.Module):
 
 
 class TimeAwareAttentionEncoder(nn.Module):
-    """TFN's encoder: T-LSTM + temporal self-attention. Adapted: input_size param instead of hardcoded CONFIG['ts_features']."""
+    """TFN's encoder: T-LSTM plus temporal self-attention. Takes ``input_size`` instead of the hard-coded CONFIG['ts_features']."""
 
     def __init__(self, input_size, hidden_size=TFN_HIDDEN, num_layers=TFN_LAYERS, num_heads=TFN_NUM_HEADS, use_temporal_attention=True):
         super().__init__()
@@ -163,11 +163,11 @@ class StaticEncoder(nn.Module):
 
 
 class TFNFullModel(nn.Module):
-    """Full TFN architecture adapted for ETHOS token sequences.
+    """The full TFN architecture for ETHOS token sequences.
 
-    Wraps TFN's MultiModal (Static + T-LSTM + temporal attention) with:
-      - token embedding at the input
-      - vocab LM head at the output (next-token prediction via cross-entropy)
+    TFN's multimodal model (static encoder, T-LSTM, temporal attention) with a token
+    embedding at the input and a vocabulary LM head at the output (next-token
+    prediction).
     """
 
     def __init__(self, vocab_size, n_embd=TFN_HIDDEN, n_layer=TFN_LAYERS,
@@ -191,21 +191,15 @@ class TFNFullModel(nn.Module):
             self.static_fusion_layer = nn.Linear(n_embd + TFN_STATIC_OUTPUT_DIM, n_embd)
 
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
-        # weight tying (matches GPT2 standard)
+        # Weight tying, as in GPT-2
         self.wte.weight = self.lm_head.weight
 
-        # Optional FFN adapter slots for hierarchical adaptation (CoCo-FL spec WP4).
-        # - ``cohort_adapter`` : per-clinical-centre adaptation (medium pace updates)
-        # - ``patient_adapter`` : per-patient personalisation (fast updates)
-        # In forward they are applied in order (cohort -> patient), each with its own
-        # residual. Initialised lazily by ``cocofl.adapters.attach_ffn_adapter``.
-        #
-        # There are exactly TWO, matching the TD: WP4 defines a cohort model per
-        # centre and a patient model per individual, below a population model that
-        # is not adapted in-place. A third ``ffn_adapter`` slot used to exist as a
-        # WP3 back-compat alias, applied AFTER both — and since it was the DEFAULT
-        # target of attach_ffn_adapter, any call that forgot to name a slot landed
-        # there and silently applied adaptation a third time.
+        # Two optional adapter slots for the hierarchy (WP4):
+        #   cohort_adapter   per centre (medium pace)
+        #   patient_adapter  per patient (fast)
+        # They are applied in that order in forward, each with its own residual, and are
+        # created by ``cocofl.adapters.attach_ffn_adapter``. The population model itself is
+        # not adapted in place, so there are exactly two.
         self.cohort_adapter = None
         self.patient_adapter = None
 
@@ -241,9 +235,7 @@ class TFNFullModel(nn.Module):
             fused = self.static_fusion_layer(torch.cat([lstm_out, expanded], dim=-1))
             lstm_out = F.relu(fused + lstm_out)
 
-        # Optional FFN adapters (Houlsby) for hierarchical adaptation.
-        # Order: cohort -> patient (matches WP4 spec, patient on top of cohort).
-        # Each slot is independent and may be None.
+        # Adapters, if attached: cohort first, then patient on top.
         if self.cohort_adapter is not None:
             lstm_out = self.cohort_adapter(lstm_out)
         if self.patient_adapter is not None:

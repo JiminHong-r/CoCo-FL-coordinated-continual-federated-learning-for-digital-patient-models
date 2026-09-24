@@ -1,21 +1,17 @@
-"""WP2 task 2+3: Dirichlet α sweep characterization.
+"""WP2 tasks 2-3: describe the centres at each Dirichlet alpha.
 
-For each α ∈ {0.1, 0.5, 1.0, 10.0} (configurable):
-  1. Partition patients into N hospitals via Dirichlet
-  2. Per hospital: patient count, sequence count, per-task positive rate, length stats
-  3. Aggregate across α values into a CSV + markdown report
+For each alpha (default 0.1, 0.5, 1.0, 10.0):
 
-Inputs:
-  --tokenized-dir : ETHOS-tokenised data dir (contains static_data.pickle)
-  --alphas        : comma-separated α values (default 0.1,0.5,1.0,10.0)
-  --num-hospitals : default 3
-  --seed          : default 42
-  --out-dir       : where to write artefacts
+1. split patients into N hospitals with a Dirichlet draw (or load the fixed split),
+2. per hospital: patients, windows, positive rate per task, sequence lengths and
+temporal density, 3. write a CSV and a markdown report across all alphas.
 
-Outputs in ``out-dir``:
-  - wp2_alpha_sweep.csv      : one row per (alpha, hospital, task)
-  - wp2_alpha_summary.csv    : one row per (alpha, hospital) aggregate stats
-  - wp2_alpha_report.md      : human-readable summary
+Inputs: ``--tokenized-dir`` (ETHOS folder with static_data.pickle), ``--alphas``,
+``--num-hospitals`` (default 3), ``--seed`` (default 42), ``--out-dir``.
+
+Outputs in ``--out-dir``: ``wp2_alpha_sweep.csv`` (one row per alpha, hospital and
+task), ``wp2_alpha_summary.csv`` (one row per alpha and hospital) and
+``wp2_alpha_report.md``.
 """
 from __future__ import annotations
 
@@ -26,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Import the existing split + dataset helpers.
+# Existing split and dataset helpers.
 from cocofl.constants import horizon_microseconds
 from cocofl.downstream.probe import window_labels
 from cocofl.evaluation.batching import sequence_lengths
@@ -37,23 +33,18 @@ from cocofl.federated.hospital_split import (
 )
 from cocofl.personalisation.run_ablation import POSITIVE_TOKENS, TASKS
 
-# Labels are identical for every hospital of every alpha, so compute them once
-# per (dataset, task) instead of once per cell.
+# Labels are the same for every hospital and alpha, so compute them once per
+# (dataset, task).
 _LABEL_CACHE: dict[tuple[int, str], "np.ndarray"] = {}
 
 
 def positive_rate(dataset, indices, pos_tokens, task_name=None) -> tuple[int, int]:
-    """Return (n_positive, n_total) for the given indices.
+    """Return ``(n_positive, n_total)`` for the given indices.
 
-    Reads labels straight off the dataset's index tensors (``window_labels``)
-    instead of calling ``dataset[idx]``, which builds a full 2048-token window
-    per index just to read one field. That cost is why this characterisation
-    was capped at 2,000 windows per cell; vectorised, the whole partition is
-    affordable and the reported positive rates are exact rather than a
-    2,000-sample estimate.
-
-    The label horizon is applied, so these rates match what the probes and the
-    WP5 harness actually train against (30 days for readmission).
+    Labels come straight from the dataset's index tensors (``window_labels``), so
+    the whole partition can be counted exactly instead of building a window per
+    index. The label horizon is applied (30 days for readmission), so the rates
+    match what the probes and the harness train on.
     """
     key = (id(dataset), task_name or "")
     if key not in _LABEL_CACHE:
@@ -68,12 +59,10 @@ def positive_rate(dataset, indices, pos_tokens, task_name=None) -> tuple[int, in
 
 
 def sequence_length_stats(dataset, indices) -> dict:
-    """Return min/max/mean/median sequence length over indices.
+    """Min, max, mean and median sequence length over ``indices``.
 
-    Uses ``evaluation.batching.sequence_lengths``, which derives the exact
-    length ``__getitem__`` would produce from the index tensors. The previous
-    version materialised each window and was hardcoded to the first 2,000
-    indices, so these stats described a prefix rather than the partition.
+    Uses ``evaluation.batching.sequence_lengths``, which gets the exact length
+    ``__getitem__`` would produce from the index tensors, for the whole partition.
     """
     idx = list(indices)
     if not idx:
@@ -98,14 +87,11 @@ def sequence_length_stats(dataset, indices) -> dict:
 
 
 def temporal_density_stats(dataset, indices) -> dict:
-    """Distribution of inter-event time deltas across patient timelines.
+    """Distribution of time gaps between events (WP2 task 3, temporal density).
 
-    Spec WP2 task 3: 'temporal density' characterises how dense events are
-    along the timeline. Uses the dataset's underlying ``times`` tensor
-    (microseconds since epoch) — computes deltas (hours) per index and
-    aggregates over up to 2000 indices for speed.
-
-    Returns p25/p50/p75 of inter-event hours plus a mean events-per-day rate.
+    Uses the dataset's ``times`` tensor (microseconds): for up to 20,000 prediction
+    points it takes the gaps (in hours) over the history before that point. Returns
+    the p25, p50 and p75 gap plus a mean events-per-day rate.
     """
     base = dataset if hasattr(dataset, "times") else getattr(dataset, "dataset", dataset)
     starts = getattr(base, "start_indices", None)
@@ -113,16 +99,12 @@ def temporal_density_stats(dataset, indices) -> dict:
         return {"n_deltas": 0, "delta_p25_h": 0.0, "delta_p50_h": 0.0,
                 "delta_p75_h": 0.0, "events_per_day": 0.0}
     deltas_hr: list[float] = []
-    # A 32-token lookback is degenerate here: the tokens immediately preceding a
-    # prediction point all belong to the same admission event and share one
-    # timestamp, so every delta is 0. 512 spans a real slice of the patient
-    # history the model conditions on (context is 2048).
+    # Look back 512 tokens. A short lookback only sees the tokens of the current
+    # admission, which all share one timestamp, so every gap would be 0.
     lookback = 512
-    # ``indices`` are SAMPLE indices; ``times`` is indexed by TOKEN. Reading
-    # times[sample_idx] measured an unrelated stretch of the corpus — the same
-    # sample-vs-token confusion that broke the hospital partition. Map through
-    # start_indices, and look BACK from the prediction point, which is the
-    # history the model actually conditions on.
+    # ``indices`` are sample indices but ``times`` is indexed by token, so map
+    # through start_indices and look back from the prediction point (the history the
+    # model sees).
     for i in indices[:20000]:
         try:
             tok = int(starts[int(i)])
@@ -139,9 +121,8 @@ def temporal_density_stats(dataset, indices) -> dict:
         return {"n_deltas": 0, "delta_p25_h": 0.0, "delta_p50_h": 0.0,
                 "delta_p75_h": 0.0, "events_per_day": 0.0}
     arr = np.asarray(deltas_hr)
-    # Many adjacent tokens share the same timestamp (events recorded at the
-    # same admission moment). Use the mean over POSITIVE deltas so the rate
-    # reflects real inter-event spacing, not within-event batching.
+    # Many neighbouring tokens share a timestamp (one event, several tokens), so the
+    # rate uses only positive gaps.
     arr_pos = arr[arr > 0]
     if arr_pos.size == 0:
         mean_h = float(arr.mean())
@@ -177,13 +158,13 @@ def main():
     alphas = [float(a) for a in args.alphas.split(",")]
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load static_data once for the patient ID list
+    # Load static_data once for the patient id list
     with open(args.tokenized_dir / "static_data.pickle", "rb") as f:
         static_data = pickle.load(f)
     all_pids = list(static_data.keys())
     print(f"Total patients in {args.tokenized_dir}: {len(all_pids):,}")
 
-    # Build each task's dataset ONCE so we can re-use across α (datasets are large)
+    # Build each task's dataset once and reuse it for every alpha (they are large)
     print("Loading task datasets ...")
     task_ds = {name: cls(args.tokenized_dir) for name, cls in TASKS.items()}
     for name, ds in task_ds.items():
@@ -195,9 +176,9 @@ def main():
     for alpha in alphas:
         print(f"\n=== α = {alpha} ===")
         if args.splits_dir is not None:
-            # Characterise the ACTUAL centre assignments from the fixed split,
-            # i.e. only the 50% federated pool (global-test + population reserve
-            # excluded). Each centre's patient set is train ∪ val ∪ test.
+            # Describe the actual centres from the fixed split, i.e. only the 50 %
+            # federated pool. Each centre's patients are its train, val and test
+            # sets together.
             split_json = load_split(args.splits_dir, alpha)
             pids_per_hospital = {
                 int(hid): list(parts["train"]) + list(parts["val"]) + list(parts["test"])
@@ -210,12 +191,11 @@ def main():
             )
         else:
             split = dirichlet_split_patients(all_pids, args.num_hospitals, alpha, seed=args.seed)
-        # Fraction is relative to the partitioned pool (the 50% federated pool
-        # when fixed splits are used, else the whole tokenized dir).
+        # Share of the partitioned pool (the 50 % federated pool with fixed splits,
+        # otherwise the whole folder).
         total_for_frac = sum(len(p) for p in split.pids_per_hospital.values())
-        # Bind to one of the datasets first to fill indices_per_hospital
-        # (We use the first task's dataset; the patient set is the same across tasks,
-        # but per-task index lists differ.)
+        # Bind each task's dataset to get per-task index lists (the patients are the
+        # same across tasks, the windows are not).
         for hid, pids in split.pids_per_hospital.items():
             n_pids = len(pids)
             row_base = {"alpha": alpha, "hospital": hid, "n_patients": n_pids}
@@ -229,11 +209,11 @@ def main():
                 full_rows.append({**row_base, "task": task_name,
                                   "n_samples_eval": n_tot, "n_positive": n_pos,
                                   "positive_rate": pos_rate})
-                # Keep per-task pos_rate in summary too
+                # Also keep the per-task positive rate in the summary
                 summary[f"{task_name}_pos_rate"] = pos_rate
                 summary[f"{task_name}_n_samples"] = n_tot
 
-            # Sequence-length stats (use the first task's dataset for tokens shape)
+            # Sequence lengths (from the mortality dataset)
             split.bind_to_dataset(task_ds["hospital_mortality"])
             idxs = split.indices_per_hospital.get(hid, [])
             seq_stats = sequence_length_stats(task_ds["hospital_mortality"], idxs)
@@ -242,7 +222,7 @@ def main():
             summary["seq_max"] = seq_stats["max"]
             summary["seq_mean"] = round(seq_stats["mean"], 1)
             summary["seq_median"] = seq_stats["median"]
-            # Temporal density (Spec WP2 task 3 — inter-event time per centre)
+            # Temporal density per centre (WP2 task 3)
             td = temporal_density_stats(task_ds["hospital_mortality"], idxs)
             summary["delta_p25_h"] = round(td["delta_p25_h"], 3)
             summary["delta_p50_h"] = round(td["delta_p50_h"], 3)

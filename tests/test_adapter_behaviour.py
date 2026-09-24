@@ -1,21 +1,12 @@
-"""Do the adapters actually do what the design assumes?
+"""Do the adapters behave as the design assumes?
 
-Four assumptions are load-bearing across WP4/WP5 and none was tested end to end:
-
-1. **Identity at initialisation.** "Round 0 is the population model" — the claim
-   that makes round 0 a legitimate selection candidate, and that makes ‖Δ‖ from
-   round 0 interpretable — is only true if a freshly attached adapter is exactly
-   the identity.
-2. **In the forward path.** A trained adapter must change predictions. If it were
-   attached but unused, every method would silently equal population_only.
-3. **Cohort and patient compose.** The TD instantiates patient models from the
-   cohort model, so both adapters must apply, in that order.
-4. **There are exactly TWO slots.** The TD defines a cohort model per centre and
-   a patient model per individual. A third ``ffn_adapter`` slot used to exist as a
-   WP3 back-compat alias, applied AFTER both — and it was the DEFAULT target of
-   ``attach_ffn_adapter``, so any call that forgot to name a level silently got a
-   third adapter. The slot is removed and ``attr`` is now required and
-   keyword-only, so the mistake is unrepresentable.
+1. Identity at initialisation: "round 0 is the population model" is only true if a
+freshly attached adapter changes nothing. 2. In the forward path: a trained adapter
+must change predictions, or every method would silently equal population_only. 3.
+Cohort and patient compose: patient models start from the cohort model, so both
+adapters apply, cohort first. 4. Exactly two slots: cohort and patient. ``attr`` is
+required and keyword-only, so a caller cannot attach a third adapter by forgetting
+to name the level.
 """
 from __future__ import annotations
 
@@ -55,7 +46,7 @@ def _x():
     return torch.randn(B, T, H)
 
 
-# --- 1. identity at initialisation ---------------------------------------
+# 1. Identity at initialisation
 
 def test_fresh_adapter_is_exactly_the_identity():
     a = FFNAdapter(H, bottleneck=4)
@@ -77,7 +68,7 @@ def test_attaching_an_adapter_does_not_change_model_output():
     assert torch.equal(m(x), before), "attach must be a no-op until trained"
 
 
-# --- 2. a trained adapter changes predictions -----------------------------
+# 2. A trained adapter changes predictions
 
 def test_a_perturbed_adapter_changes_the_output():
     m = _Backbone()
@@ -106,7 +97,7 @@ def test_base_parameters_are_frozen_by_attach():
     assert not m.encoder.weight.requires_grad, "the backbone must stay frozen"
 
 
-# --- 3. cohort and patient compose ---------------------------------------
+# 3. Cohort and patient compose
 
 def test_both_adapters_apply_and_in_cohort_then_patient_order():
     m = _Backbone()
@@ -119,7 +110,7 @@ def test_both_adapters_apply_and_in_cohort_then_patient_order():
         p.up.weight.fill_(0.02)
     both = m(x)
     assert not torch.allclose(both, cohort_only), "patient adapter must also apply"
-    # Order matters: patient sees the cohort-adapted representation.
+    # Order matters: the patient adapter sees the cohort-adapted representation.
     m2 = copy.deepcopy(m)
     m2.cohort_adapter = None
     assert not torch.allclose(m2(x), both), "patient alone != cohort+patient"
@@ -135,7 +126,7 @@ def test_attach_is_idempotent_and_does_not_overwrite():
     assert float(a2.up.weight[0, 0]) == pytest.approx(0.5)
 
 
-# --- 4. exactly two levels, and no way to add a third by accident --------
+# 4. Exactly two levels, and no way to add a third by accident
 
 def test_the_backbone_has_exactly_two_adapter_slots():
     from cocofl.models.backbone import TFNFullModel
@@ -168,13 +159,10 @@ def test_state_dict_helpers_also_require_an_explicit_slot():
         assert p.kind is p.KEYWORD_ONLY and p.default is p.empty, fn.__name__
 
 
-# --- position-wise: adapting all T then taking the last == adapting last ---
+# Position-wise: adapting every step then taking the last = adapting the last
 
 def test_adapter_is_position_wise():
-    """The downstream head reads only hidden_states[:, -1, :], so the adapter's
-    effect on earlier timesteps is discarded. Harmless numerically — Linear acts
-    on the last dim independently — but it means the adapter runs on up to 2,048
-    positions to influence one, which is pure compute."""
+    """The head reads only hidden_states[:, -1, :], so adapting earlier steps changes nothing numerically; it only costs compute."""
     a = FFNAdapter(H, bottleneck=4)
     with torch.no_grad():
         a.up.weight.normal_(0, 0.1)

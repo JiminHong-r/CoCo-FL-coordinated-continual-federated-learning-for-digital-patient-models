@@ -1,15 +1,14 @@
-"""CoCo-FL hierarchical 3-level adaptation (Spec WP4).
+"""CoCo-FL three-level adaptation (WP4).
 
-Three nested levels of adaptation on top of a frozen population backbone:
+Two adapter levels on top of a frozen population backbone::
 
     Population (frozen)
         └ Cohort adapter (per clinical centre, medium pace)
               └ Patient adapter (per patient, fast pace)
 
-Adaptation flows BIDIRECTIONALLY:
-- Top-down: cohort init from population, patient init from cohort
-- Bottom-up: patient deltas aggregate into cohort updates; cohort updates
-  aggregate into slow population evolution (``upward_prop`` module).
+Adaptation flows both ways. Downward: a cohort starts from the population and a
+patient from their cohort. Upward: patient updates fold into the cohort, and cohort
+updates fold slowly into the population (``upward_prop``).
 """
 from .cohort import (
     CohortConfig,

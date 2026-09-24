@@ -1,39 +1,24 @@
-"""Does adaptation beat simply RECALIBRATING the population model?
+"""Does adaptation beat simply recalibrating the population model?
 
-WHY THIS EXISTS
----------------
-Adaptation improves ECE decisively — 19 of 28 paired comparisons significant,
-against 2 of 28 on AUROC. But the gain also appears on the RANDOM split, where
-WP2 characterisation showed the centres are near-identical. If the mechanism were
-per-centre label shift, that should not happen.
+Adaptation lowers calibration error, but there is a simple explanation to rule out
+first. The population head is fitted class-balanced and evaluated at natural
+prevalence, so it is over-confident at every centre, heterogeneous or not, and any
+local fine-tuning partly undoes that. So the adapted methods are compared with two
+baselines::
 
-There is a mundane explanation that must be ruled out first. The population head
-is fitted CLASS-BALANCED and evaluated at NATURAL prevalence, so it is
-systematically over-confident for every centre, heterogeneity or not. Any
-per-centre fine-tuning partly corrects that global offset. Unless it is measured,
-"adaptation improves calibration" may be "adaptation undoes our class balancing".
+    raw           the population model as reported
+    global-recal  one intercept for all centres (removes the balanced-fit mismatch)
+    centre-recal  one intercept per centre (also removes per-centre label shift)
 
-So the adapted methods are compared against two progressively stronger baselines:
+``centre-recal`` costs one number per centre, while a cohort adapter has 66,112
+parameters. If adaptation does not beat it, the adapters add nothing on top of a
+per-centre intercept.
 
-  raw          the population model as reported
-  global-recal ONE intercept shared by all centres, fitted on pooled data.
-               Removes exactly the balanced-fit / natural-eval mismatch.
-  centre-recal ONE intercept PER CENTRE. Removes the mismatch AND per-centre
-               label shift — i.e. everything a prior correction can do.
+The intercepts are fitted out of fold (K folds over windows; fit on the other folds,
+apply to the held-out one), so no window helps fit the correction it is scored with.
+Recalibration is monotone, so AUROC does not change; it is printed as a check.
 
-The second is the decisive one. `centre-recal` costs ONE SCALAR per centre; a
-cohort adapter costs 66,112 parameters. If adaptation does not beat it, then the
-honest finding is that a per-centre intercept captures the entire effect and the
-adapters add nothing on top — which is a real result, and a far more useful
-statement than "adaptation improves calibration".
-
-NO LEAKAGE: intercepts are fitted OUT OF FOLD (K-fold over windows, fitted on the
-other folds, applied to the held-out one), so no window contributes to the
-correction that is scored on it. Fitting on the same predictions being scored
-would guarantee the baseline looks good and prove nothing.
-
-Recalibration is a monotone transform of the scores, so AUROC is unchanged by
-construction — reported as a sanity check that the plumbing is right.
+::
 
     python scripts/recalibration_baseline.py <cell_dir> [--folds 5] [--n 300]
 """
@@ -59,12 +44,11 @@ def _logit(p: np.ndarray) -> np.ndarray:
 
 
 def _fit_intercept(logits: np.ndarray, y: np.ndarray) -> float:
-    """Intercept b minimising NLL of sigmoid(logit + b). Slope fixed at 1.
+    """Intercept ``b`` minimising the NLL of ``sigmoid(logit + b)``, slope fixed at 1.
 
-    Fixing the slope keeps this the MINIMAL correction — a pure prior shift,
-    which is the Bayes-optimal response to a base-rate change and exactly what a
-    frozen head cannot express. Letting the slope move would fit sharpness too
-    and stop being a clean "prior correction" comparator.
+    Fixing the slope keeps this the smallest correction: a pure shift in baseline
+    risk, the right response to a base-rate change and exactly what a frozen head
+    cannot do.
     """
     if len(y) == 0 or len(np.unique(y)) < 2:
         return 0.0
@@ -80,7 +64,7 @@ def _fit_intercept(logits: np.ndarray, y: np.ndarray) -> float:
 
 
 def recalibrate(per_hosp: dict, mode: str, folds: int, seed: int = 0) -> dict:
-    """Out-of-fold recalibrated predictions. mode: 'global' | 'centre'."""
+    """Out-of-fold recalibrated predictions. ``mode`` is 'global' or 'centre'."""
     rng = np.random.default_rng(seed)
     hosps = sorted(per_hosp)
     assign = {h: rng.integers(0, folds, len(per_hosp[h][0])) for h in hosps}
@@ -137,7 +121,7 @@ def main() -> None:
         d = "" if k == REF else f"{ece[k] - ece[REF]:+.4f}"
         print(f"  {k:<24}{ece[k]:>11.4f}{d:>10}{auroc[k]:>13.5f}")
 
-    # The decisive comparison: adaptation against a per-centre intercept.
+    # The key comparison: adaptation against a per-centre intercept.
     base = "POP + centre-recal"
     n_by = {h: len(cand[REF][h][0]) for h in hosps}
     rng = np.random.default_rng(args.seed)

@@ -1,16 +1,15 @@
-"""Consolidated paired-bootstrap verdict across every testable cell.
+"""Paired-bootstrap summary across every testable cell.
 
-One table per metric: the paired delta vs ``population_only``, marked when the
-95 % CI excludes zero. A single cell cannot show that an effect is CONSISTENT,
-and consistency across cells is what separates a finding from a lucky draw —
-especially here, where the effects on AUROC are ~0.001-0.003 and one accidental
-same-config replicate already showed round selection swinging on noise.
+One table per metric: the paired difference against ``population_only``, marked when
+the 95 % CI excludes zero. One cell cannot show that an effect is consistent; the
+table across cells can.
 
-Efficiency: the reference metric depends only on the resample index, not on the
-method, so it is computed ONCE per resample and reused across methods. Computing
-it inside the per-method loop doubled the cost of the slowest step for nothing.
+The reference metric depends only on the resample, not on the method, so it is
+computed once per resample and reused for every method.
 
-    python scripts/summarise_paired.py [--n 300]
+::
+
+    python scripts/summarise_paired.py [--n 300] [--glob "results_v11full*"]
 """
 from __future__ import annotations
 
@@ -75,10 +74,7 @@ def short(cell: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=300)
-    # Which campaign to summarise. Hardcoding a prefix meant this script could
-    # only ever describe the run it was written for; the reported grid has since
-    # moved to the Flower campaign, and a second hardcoded pattern would leave the
-    # same trap for the next one.
+    # Which campaign to summarise (default: the reported grid).
     ap.add_argument("--glob", default="results_v11full*",
                     help="cell-directory glob (default: the reported Flower grid)")
     args = ap.parse_args()

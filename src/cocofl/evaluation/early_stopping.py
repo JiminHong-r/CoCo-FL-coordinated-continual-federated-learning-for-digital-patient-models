@@ -32,7 +32,7 @@ class EarlyStoppingMonitor:
         self.last_round = round_idx
         self.history.append((round_idx, val_score))
         if val_score is None:
-            # Treat None scores as 'no improvement' but don't crash the loop.
+            # Treat a None score as no improvement instead of failing.
             self.stale += 1
         elif val_score > self.best:
             self.best = float(val_score)

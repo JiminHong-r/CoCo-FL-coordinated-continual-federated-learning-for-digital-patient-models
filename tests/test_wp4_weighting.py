@@ -1,14 +1,11 @@
-"""WP4 task 3/5 knobs must actually reach the coordinator and do something.
+"""The WP4 task 3 and 5 settings must reach the coordinator and change something.
 
-Two failures this pins, both of which produced results that *looked* fine:
+Two past failures looked fine in the results:
 
-* ``weighting_scheme`` and ``divergence_threshold`` were never read by
-  ``run_evaluation.py``, so every reported run used volume + frequency-only no
-  matter what was passed on the command line.
-* ``uncertainty`` weighting was fed a hardcoded loss of ``1.0`` for every
-  patient, so its inverse-loss weights were all equal — it was ``uniform`` under
-  a different name, and an ablation comparing the two would have shown a
-  spurious "no difference".
+* ``weighting_scheme`` and ``divergence_threshold`` were never read by the harness,
+so every run used volume weighting and the frequency trigger. * ``uncertainty``
+weighting got a fixed loss of 1.0 for every patient, so its inverse-loss weights
+were all equal: it was ``uniform`` under another name.
 """
 from __future__ import annotations
 
@@ -27,11 +24,10 @@ def test_uniform_weights_ignore_counts():
 
 
 def test_recency_without_timestamps_is_the_deprecated_position_fallback():
-    """Position decay is NOT recency — every update in a round is equally recent.
+    """Without timestamps, recency falls back to decay by list position, and must warn.
 
-    Kept only for callers that cannot supply timestamps, and it must warn: a
-    silent fallback here is precisely the defect that made the task-3 `recency`
-    arm measure arbitrary list ordering. Time-based behaviour is pinned in
+    Position is not recency (every update in a round is equally recent), so the
+    fallback must not be silent. Time-based recency is tested in
     tests/test_wp4_spec_compliance.py.
     """
     with pytest.warns(UserWarning, match="POSITION decay"):
@@ -47,14 +43,10 @@ def test_uncertainty_is_inverse_loss():
 
 
 def test_uncertainty_reaches_the_cohort_to_population_step():
-    """The cohort->population step must supply losses, not just patient->cohort.
+    """The cohort-to-population step must receive losses too.
 
-    The 2026-08-08 fix wired real losses into ``propagate_patients_to_cohort``
-    only. ``propagate_cohorts_to_population`` still passed ``scheme`` with no
-    ``losses``, so every ``weighting_scheme=uncertainty`` run died on the first
-    population sync with "uncertainty weighting requires losses" — the whole
-    task-3 arm produced no results at all while the ablation table listed it as
-    still running.
+    Without them every ``weighting_scheme=uncertainty`` run failed at the first
+    population sync with "uncertainty weighting requires losses".
     """
     from cocofl.hierarchical.upward_prop import propagate_cohorts_to_population
 
@@ -63,7 +55,7 @@ def test_uncertainty_reaches_the_cohort_to_population_step():
         None, cohorts, [10, 10], eta_population=1.0,
         scheme="uncertainty", losses=[0.1, 1.0],
     )
-    # Cohort 0 has the lower loss, so it dominates the aggregate.
+    # Cohort 0 has the lower loss, so it counts more.
     assert out["a"][0] > out["a"][1]
 
     with pytest.raises(ValueError, match="requires losses"):
@@ -73,13 +65,13 @@ def test_uncertainty_reaches_the_cohort_to_population_step():
 
 
 def test_coordinator_passes_losses_to_the_population_step():
-    """Pins the call site, not just the callee — the bug was a missing kwarg."""
+    """Check the call site passes losses, not only the function that receives them."""
     import inspect
     import re
 
     from cocofl.hierarchical.coordinator import HierarchicalCoordinator
 
-    # Step 4 lives in `_finish_round`, which `run_round` tail-calls.
+    # Step 4 is in _finish_round, which run_round calls at the end.
     src = inspect.getsource(HierarchicalCoordinator._finish_round)
     call = re.search(
         r"propagate_cohorts_to_population\((.*?)\)\n", src, re.DOTALL,
@@ -92,10 +84,10 @@ def test_coordinator_passes_losses_to_the_population_step():
 
 
 def test_uncertainty_with_constant_losses_degenerates_to_uniform():
-    """This is exactly what the hardcoded 1.0 produced — the bug, pinned.
+    """Constant losses make uncertainty weighting identical to uniform weighting.
 
-    If a future change reintroduces a constant loss, the uncertainty arm of the
-    task-3 ablation silently becomes a duplicate of the uniform arm.
+    If a constant loss comes back, the uncertainty arm silently duplicates the
+    uniform arm.
     """
     constant = _weights_for("uncertainty", [1, 5, 9], losses=[1.0, 1.0, 1.0])
     uniform = _weights_for("uniform", [1, 5, 9])
@@ -116,7 +108,7 @@ def test_unknown_scheme_is_rejected():
 
 
 def test_patient_trainer_returns_its_loss():
-    """The coordinator needs a real per-patient loss for uncertainty weighting."""
+    """The patient trainer must return a real per-patient loss for uncertainty weighting."""
     import inspect
 
     from cocofl.hierarchical.patient import train_patient_adapter

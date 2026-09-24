@@ -1,30 +1,25 @@
-"""Patient-adapter acceptance must distinguish "rejected" from "unjudgeable".
+"""Patient-adapter acceptance must tell "rejected" apart from "could not be judged".
 
-Acceptance compares the personalised model's AUROC against the cohort model's on
-the patient's OWN val slice. AUROC is undefined on a single-class slice, so
-``a_pers`` is None and the adapter is rejected without ever being evaluated.
+Acceptance compares AUROCs on the patient's own validation slice. On a single-class
+slice AUROC is None and the adapter is rejected without being tested. For a terminal
+outcome that is every case. On the real cohort at ``min_samples=60``::
 
-For a terminal, once-per-patient outcome that is not an edge case, it is every
-case. Measured on the real cohort at ``min_samples=60``:
+    hospital_mortality   0 of 40 validation slices hold both classes
+    readmission         37 of 40 validation slices hold both classes
 
-    hospital_mortality   0 of 40 val slices carry both classes
-    readmission         37 of 40 val slices carry both classes
-
-So every mortality adapter is rejected by construction. Reporting that as
-"0 of 23 accepted" invites the conclusion that personalisation does not work,
-when the truth is that it was never tested. These tests pin the distinction, and
-pin the evidence floor that stops the pooled patient AUROC from reporting a
-perfect 1.0000 off a single positive.
+So "0 of 23 accepted" for mortality means "never tested", not "failed". These tests
+check that distinction, and the evidence floor that stops the pooled patient AUROC
+from reporting 1.0000 off a single positive.
 """
 from __future__ import annotations
 
 from cocofl.personalisation.evaluate import auc_from_preds
 
 
-# --- the root cause, in the terms the harness sees ------------------------
+# The root cause, as the harness sees it
 
 def test_auc_is_none_on_a_single_class_slice():
-    """This None is the whole mechanism — it becomes an unconditional reject."""
+    """This None is what turns into an automatic reject."""
     assert auc_from_preds([0.9, 0.2, 0.5], [0, 0, 0]).auc is None
     assert auc_from_preds([0.9, 0.2, 0.5], [1, 1, 1]).auc is None
 
@@ -34,7 +29,7 @@ def test_auc_is_defined_once_both_classes_appear():
 
 
 def _decide(a_pers, a_base):
-    """Mirrors the harness's accept/reject, including the evaluability split."""
+    """Same accept/reject rule as the harness, including the evaluability split."""
     evaluable = a_pers is not None
     use_patient = evaluable and (a_base is None or a_pers >= a_base)
     return use_patient, (not evaluable)
@@ -62,12 +57,12 @@ def test_tie_goes_to_the_patient_adapter():
 
 
 def test_adapter_is_accepted_when_the_cohort_baseline_is_undefined():
-    """If only the cohort side is unjudgeable, the patient side still counts."""
+    """If only the cohort side cannot be judged, the patient side still counts."""
     use, uneval = _decide(0.75, None)
     assert use is True and uneval is False
 
 
-# --- pooled patient AUROC needs an evidence floor -------------------------
+# The pooled patient AUROC needs an evidence floor
 
 def _pooled_auc(preds, labels, floor):
     n_pos = sum(labels)
@@ -78,8 +73,7 @@ def _pooled_auc(preds, labels, floor):
 
 
 def test_single_positive_cannot_produce_a_perfect_score():
-    """The 1.0000 that appeared on class-aware mortality, and became Δ_patient
-    = +0.093, came from exactly this shape."""
+    """One positive must not give a perfect score (this produced a spurious Delta_patient of +0.093 on class-aware mortality)."""
     preds = [0.99] + [0.1] * 40
     labels = [1] + [0] * 40
     assert auc_from_preds(preds, labels).auc == 1.0, "unguarded, it is perfect"

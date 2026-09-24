@@ -1,16 +1,10 @@
-"""Every keyword the harness passes must exist on the callee.
+"""Every keyword the harness passes must exist on the function it calls.
 
-A real crash this would have caught: ``probe_loaders`` was added to
-``_round_loop_with_early_stopping`` and ``run_standard_fedavg``, and passed from
-``run_evaluation.main`` to all four training methods — but never added to
-``run_local_finetune`` or ``run_top_down_only``. Every unit test passed, because
-they inspected SOURCE TEXT for the presence of strings rather than checking that
-the call contract holds. The failure surfaced only in an end-to-end smoke run, as
-``TypeError: run_local_finetune() got an unexpected keyword argument``, which
-would have killed the next full 5-method cell on launch.
-
-Static, no GPU, no data: parse the call sites in ``main`` and check every keyword
-against the callee's signature.
+``probe_loaders`` was once passed to all four training methods but added to only two
+of them. Unit tests that searched the source for strings still passed; an end-to-end
+run failed with ``TypeError: ... unexpected keyword argument``. This parses the call
+sites in ``main`` and checks each keyword against the callee's signature. Static: no
+GPU, no data.
 """
 from __future__ import annotations
 
@@ -33,7 +27,7 @@ TARGETS = {
 
 
 def _call_sites():
-    """Every call to a TARGETS function anywhere in run_evaluation.py."""
+    """Every call to a TARGETS function in run_evaluation.py."""
     src = pathlib.Path(inspect.getfile(run_evaluation)).read_text()
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -64,7 +58,7 @@ def test_every_keyword_at_every_call_site_exists_on_the_callee(name):
 
 @pytest.mark.parametrize("name", sorted(TARGETS))
 def test_no_call_site_omits_a_required_parameter(name):
-    """Positional-or-keyword params with no default must be supplied somehow."""
+    """Parameters without a default must be supplied."""
     sig = inspect.signature(TARGETS[name])
     required = [n for n, p in sig.parameters.items()
                 if p.default is p.empty
@@ -80,7 +74,7 @@ def test_no_call_site_omits_a_required_parameter(name):
 
 
 def test_probe_loaders_specifically_reaches_all_four_methods():
-    """The regression that motivated this file."""
+    """The regression that led to this file."""
     for fn in ("run_local_finetune", "run_top_down_only",
                "run_standard_fedavg", "run_hierarchical_bidir"):
         assert "probe_loaders" in inspect.signature(TARGETS[fn]).parameters, fn

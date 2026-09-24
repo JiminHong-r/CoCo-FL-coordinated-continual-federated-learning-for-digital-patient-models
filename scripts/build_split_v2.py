@@ -1,30 +1,22 @@
-"""WP2 splits aligned with the updated TD (2026-06-08).
+"""Build the WP2 splits (TD Sec. 2.2).
 
-Spec (Sec. 2.2 of the new TD):
-  1. Extract a global held-out test set (10%) BEFORE any other split.
-  2. Reserve 40% of patients EXCLUSIVELY for population pre-training;
-     no centre has access to this portion.
-  3. Apply Dirichlet partitioning to the remaining 50% to assign patients
-     to three simulated centres (α ∈ {0.1, 0.5, 1.0, 10.0}).
+1. Take a 10 % global held-out test set out first. 2. Keep 40 % of patients for
+population pre-training only; no centre sees them. 3. Split the remaining 50 %
+across three simulated centres with a Dirichlet draw (alpha in {0.1, 0.5, 1.0,
+10.0}). ``--class-aware`` draws separately per age tertile, so centres differ in who
+they see and not only in size.
 
-The three shares are taken as fractions of the **total** cohort
-(10% + 40% + 50% = 100%), so the spec's "remaining 50%" holds literally.
-All three sets are carved from the same source pool and are mutually
-disjoint at the patient level:
+The shares are fractions of the whole cohort (10 + 40 + 50 = 100 %), and the three
+sets share no patients:
 
-  - global_test  (10%) → honest population AUROC evaluation
-  - population   (40%) → population pre-training only, no centre access
-  - federated    (50%) → Dirichlet-split into ``num_hospitals`` centres
+- global_test (10 %): population evaluation - population (40 %): population
+pre-training only - federated (50 %): split into ``num_hospitals`` centres
 
-Pass one or more ``--tokenized-dir`` arguments; their ``static_data.pickle``
-patient pools are merged into a single cohort before splitting (e.g. point
-at both ``mimic_train`` and ``mimic_test`` to use the full cohort).
+Several ``--tokenized-dir`` folders can be given; their patients are merged into one
+cohort first.
 
-Outputs ``--out-dir``:
-  - global_test.json            {patient_ids: [...], n: ...}
-  - population_reserve.json     {patient_ids: [...], n: ...}
-  - alpha_{0.1,0.5,1.0,10.0}.json  hospitals on the 50% federated pool
-  - index.json
+Written to ``--out-dir``: ``global_test.json``, ``population_reserve.json``, one
+``alpha_<a>.json`` per alpha, and ``index.json``.
 """
 from __future__ import annotations
 
@@ -38,10 +30,10 @@ from cocofl.federated.hospital_split import dirichlet_split_patients
 
 
 def load_pool(tokenized_dirs: list[Path]) -> list:
-    """Merge static_data patient IDs from one or more tokenized dirs.
+    """Merge the patient ids from one or more tokenised folders.
 
-    Raises if the same patient ID appears in more than one source dir, so
-    pooling cannot silently introduce duplicates / cross-pool leakage.
+    Raises if a patient appears in more than one folder, so merging cannot create
+    duplicates or leakage.
     """
     pool: dict = {}
     for d in tokenized_dirs:
@@ -58,14 +50,13 @@ def load_pool(tokenized_dirs: list[Path]) -> list:
 
 
 def build_age_class_labels(tokenized_dirs, target_pids):
-    """Coarse age-tertile class label per patient for class-aware partitioning.
+    """Age-tertile class label per patient, for the class-aware split.
 
-    age = (first_event_time - birth) / year, computed from the tokenized timeline
-    (birth from static_data MEDS_BIRTH, first event time from the patient's first
-    token). Tertile cutoffs over the target pool give 3 classes
-    (age_young / age_mid / age_old). Patients with no birth record default to
-    age_mid so they don't form a degenerate class. EVERY target pid gets a label
-    (required — class-aware Dirichlet drops unlabelled patients).
+    Age = (first event time - birth) in years, from the timeline (birth from
+    static_data MEDS_BIRTH). Tertile cut-offs over the pool give three classes
+    (age_young, age_mid, age_old). Patients with no birth record get age_mid, so
+    they do not form their own class. Every patient gets a label, because the
+    class-aware split drops unlabelled patients.
     """
     import numpy as np
     from cocofl.data.base import TimelineDataset
@@ -117,11 +108,11 @@ def main():
                     help="one or more tokenized dirs with static_data.pickle; "
                          "their patient pools are merged into one cohort")
     ap.add_argument("--out-dir", required=True, type=Path)
-    # Three-way split fractions of the TOTAL cohort (must sum to 1.0).
+    # Split fractions of the whole cohort (must add up to 1.0).
     ap.add_argument("--global-test-frac", type=float, default=0.10)
     ap.add_argument("--population-frac", type=float, default=0.40)
     ap.add_argument("--federated-frac", type=float, default=0.50)
-    # Within-hospital train/val/test fractions (of each hospital's patients).
+    # Train/val/test fractions within each hospital.
     ap.add_argument("--frac-train", type=float, default=0.70)
     ap.add_argument("--frac-val", type=float, default=0.15)
     ap.add_argument("--frac-test", type=float, default=0.15)
@@ -150,7 +141,8 @@ def main():
     n_total = len(all_pids)
     n_test = int(round(n_total * args.global_test_frac))
     n_pop = int(round(n_total * args.population_frac))
-    # federated takes the remainder so the three sets exactly tile the cohort
+    # The federated pool takes the remainder, so the three sets cover the cohort
+    # exactly
     global_test_pids = sorted(all_pids[:n_test])
     population_pids = sorted(all_pids[n_test:n_test + n_pop])
     federated_pool_pids = sorted(all_pids[n_test + n_pop:])
@@ -166,7 +158,7 @@ def main():
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write global_test.json
+    # global_test.json
     (args.out_dir / "global_test.json").write_text(json.dumps({
         "patient_ids": global_test_pids,
         "n": len(global_test_pids),
@@ -175,7 +167,7 @@ def main():
         "seed": args.seed,
     }, indent=2))
 
-    # Write population_reserve.json
+    # population_reserve.json
     (args.out_dir / "population_reserve.json").write_text(json.dumps({
         "patient_ids": population_pids,
         "n": len(population_pids),
@@ -191,7 +183,7 @@ def main():
         print("Class-aware partitioning: building per-patient age labels ...")
         class_labels = build_age_class_labels(args.tokenized_dir, federated_pool_pids)
 
-    # Build Dirichlet splits on the federated (50%) pool
+    # Dirichlet splits of the federated (50 %) pool
     alphas = [float(a) for a in args.alphas.split(",")]
     index_entries = []
     for alpha in alphas:
@@ -255,8 +247,8 @@ def main():
         ),
     }, indent=2))
 
-    # Sanity: cross-check disjointness of the three top-level sets and that no
-    # hospital partition contains a global_test or population patient.
+    # Checks: the three top-level sets share no patients, and no hospital contains a
+    # global-test or reserve patient.
     test_set = set(global_test_pids)
     pop_set = set(population_pids)
     fed_set = set(federated_pool_pids)
@@ -277,7 +269,7 @@ def main():
             assert not (in_split & pop_set), (
                 f"LEAK: α={alpha} hospital {hid} contains population patients"
             )
-            # no patient in two partitions / two hospitals of the same split
+            # No patient in two partitions or two hospitals of the same split
             for partition in ("train", "val", "test"):
                 for pid in parts[partition]:
                     key = f"h{hid}/{partition}"

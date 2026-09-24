@@ -1,7 +1,6 @@
-"""Evaluation for TFN-based personalisation.
+"""Evaluation helpers for TFNDownstreamClassifier on TFN-format batches.
 
-Mirrors ``personalize.evaluate`` but works on the TFNDownstreamClassifier with
-TFN-format batches: ``((x, elapsed, cat, num), y_dict)``.
+Batches are ``((x, elapsed, cat, num), y_dict)``.
 """
 from __future__ import annotations
 
@@ -30,11 +29,9 @@ class MetricsResult:
     ece: float | None
     n: int
     n_pos: int
-    # The per-window predictions these metrics were computed from. Every method
-    # is scored on IDENTICAL windows, so their differences are PAIRED and far
-    # better determined than independent per-method confidence intervals suggest
-    # — but only if the predictions survive to be tested. A finished cell cannot
-    # regenerate them, so they are carried here rather than recomputed.
+    # The per-window predictions behind these metrics. Every method is scored on the
+    # same windows, so their differences can be tested as paired quantities later; a
+    # finished run cannot recompute them.
     preds: list[float] | None = None
     labels: list[int] | None = None
 
@@ -93,10 +90,10 @@ def eval_full(
     device: torch.device,
     max_batches: int | None = None,
 ) -> MetricsResult:
-    """Single forward pass that yields AUROC + AUPRC + ECE on the same preds.
+    """One forward pass giving AUROC, AUPRC and ECE on the same predictions.
 
-    All three metrics are returned as ``None`` when the loader has a single
-    class (AUROC/AUPRC undefined) or no samples (ECE undefined).
+    All three are ``None`` when the loader holds a single class (AUROC and AUPRC
+    undefined) or no samples (ECE undefined).
     """
     from ..evaluation.metrics import auprc, expected_calibration_error
     preds, labels = predict(classifier, loader, label_fn, device, max_batches)

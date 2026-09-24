@@ -1,15 +1,10 @@
-"""A paired difference must be estimated on the SAME resampled windows.
+"""A paired difference must be estimated on the same resampled windows.
 
-Every WP5 method scores identical evaluation windows, so their differences are
-paired. Reporting them against independent per-method confidence intervals is the
-wrong instrument, and the mismatch is not subtle: on class-aware readmission α=0.5
-the independent half-width is ~±0.016 while the observed differences are ~0.0006.
-Under that reporting every comparison is "inside the CI" forever, which says
-nothing about the methods.
-
-These tests pin the two properties that make the paired estimate valid: the same
-resample must be applied to both methods, and the pairing must be refused if the
-two methods did not in fact score the same windows.
+All methods score the same windows, so their differences are paired. Separate
+per-method intervals (about +/-0.016 on class-aware readmission alpha=0.5) are far
+wider than the differences (about 0.0006) and could never resolve them. These tests
+check that one resample is applied to both methods, and that pairing is refused when
+the methods did not score the same windows.
 """
 from __future__ import annotations
 
@@ -41,7 +36,7 @@ def data():
 
 
 def test_shared_resampling_is_much_tighter_than_independent(data):
-    """The whole point: pairing cancels shared window difficulty."""
+    """Pairing cancels the shared window difficulty, so the interval is much tighter."""
     a, b, y = data
     paired = paired_diffs(a, b, y, shared=True)
     indep = paired_diffs(a, b, y, shared=False)
@@ -59,7 +54,7 @@ def test_near_identical_methods_give_a_ci_containing_zero(data):
 
 
 def test_a_genuinely_better_method_is_detected(data):
-    """Pairing must not be so conservative that real effects vanish."""
+    """Pairing must still detect a real difference."""
     a, _, y = data
     rng = np.random.default_rng(3)
     worse = rng.normal(y * 0.3, 1.0)      # clearly weaker signal
@@ -69,14 +64,14 @@ def test_a_genuinely_better_method_is_detected(data):
 
 
 def test_alignment_check_rejects_mismatched_labels():
-    """A paired test on windows that are not the same windows is invalid."""
+    """A paired test on different windows is invalid and must be refused."""
     y1 = np.array([0, 1, 0, 1])
     y2 = np.array([1, 1, 0, 0])
     assert not np.array_equal(y1, y2)
 
 
 def test_predictions_are_carried_on_the_metrics_result():
-    """They cannot be regenerated once a cell has finished."""
+    """The predictions must be kept, since they cannot be recomputed after a run."""
     from cocofl.personalisation.evaluate import MetricsResult
     m = MetricsResult(auroc=0.8, auprc=0.4, ece=0.1, n=3, n_pos=1,
                       preds=[0.9, 0.1, 0.2], labels=[1, 0, 0])

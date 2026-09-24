@@ -1,39 +1,25 @@
-"""Run the WP4 adapter FedAvg through Flower's client/server runtime.
+"""Run the federated steps through Flower's client/server runtime.
 
-WHY THIS EXISTS
----------------
-``fedavg.py`` simulates federation in one process: a loop over hospitals, then a
-weighted average. That is sufficient for the science — and it is what produced
-every reported number — but it does not demonstrate that the method runs under a
-real federated-learning runtime, where each centre is a separate client that only
-ever exchanges parameters with a server.
+Each centre is a Flower client that only exchanges parameters with a server. The
+maths is the same as the in-process loop: Flower's ``FedAvg`` computes
 
-This module supplies that demonstration WITHOUT changing any result. Flower's
-built-in ``FedAvg`` strategy aggregates with
+    w_global = sum_i (n_i * w_i) / sum_i n_i
 
-    w_global = sum_i (n_i * w_i) / sum_i n_i          (flwr.server.strategy.aggregate)
-
-and ``fedavg.fedavg_states`` computes
+and ``upward_prop.weighted_state_average`` computes
 
     w_global = sum_i ((n_i / sum_j n_j) * w_i)
 
-which is the same quantity, differing only in the order of the divide. The
-equivalence is asserted numerically in ``tests/test_flower_equivalence.py`` rather
-than argued, because "the runtime does not change the result" is exactly the kind
-of claim that should be checked rather than assumed.
+which is the same number with the division done in a different place.
+``tests/test_flower_equivalence.py`` checks this numerically.
 
-WHAT TRAVELS
-------------
-Only the adapter state (plus the classifier head when ``train_head`` is on) — the
-same 66,112 parameters per level the communication analysis counts. The frozen
-backbone never moves, so the Flower payload matches the reported cost.
+What travels: only the adapter state (plus the classifier head when ``train_head``
+is on), the same 66,112 parameters per level the communication analysis counts. The
+frozen backbone never moves.
 
-KEY ORDERING IS LOAD-BEARING
-----------------------------
-Flower exchanges an ORDERED list of arrays with no names attached. Client and
-server must therefore agree on the order, and a mismatch would silently average
-the wrong tensors together rather than raise. Every conversion here goes through
-``sorted(state)``, and the round-trip is tested.
+Key order matters: Flower sends an ordered list of arrays without names, so client
+and server must use the same order, or the wrong tensors get averaged together with
+no error. Every conversion here uses ``sorted(state)``, and the round trip is
+tested.
 """
 from __future__ import annotations
 
@@ -53,8 +39,8 @@ def ndarrays_to_state(arrays: list[np.ndarray],
                       reference: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Ordered arrays -> state dict, using ``reference``'s keys and dtypes.
 
-    ``reference`` supplies the names the wire format drops. Shapes are checked
-    because a silent mismatch here would average unrelated tensors.
+    ``reference`` supplies the names the wire format drops. Shapes are checked,
+    because a mismatch here would quietly average unrelated tensors.
     """
     keys = sorted(reference)
     if len(arrays) != len(keys):
@@ -64,12 +50,9 @@ def ndarrays_to_state(arrays: list[np.ndarray],
     out: dict[str, torch.Tensor] = OrderedDict()
     for k, a in zip(keys, arrays):
         ref = reference[k]
-        # DEVICE, not just dtype. The wire format is CPU numpy by construction,
-        # so rebuilding without ``device=`` yields CPU tensors while the rest of
-        # the pipeline lives on cuda — and the failure surfaces later, at the
-        # first arithmetic against a live state ("Expected all tensors to be on
-        # the same device"), far from the round trip that caused it. The
-        # reference supplies names, dtype AND placement.
+        # Restore the device as well as the dtype. The wire format is CPU numpy, and
+        # CPU tensors would only fail later, at the first operation with a CUDA
+        # tensor.
         t = torch.as_tensor(a, dtype=ref.dtype, device=ref.device)
         if tuple(t.shape) != tuple(ref.shape):
             raise ValueError(
@@ -83,26 +66,17 @@ def ndarrays_to_state(arrays: list[np.ndarray],
 def make_hierarchical_strategy():
     """Flower strategy for the hierarchy's upward step.
 
-    WHY A CUSTOM STRATEGY IS NEEDED
-    -------------------------------
-    Only ONE of the five WP5 methods is FedAvg. `standard_fedavg` aggregates by
-    weighted average, which Flower's built-in `FedAvg` computes exactly (see
-    tests/test_flower_equivalence.py). The hierarchy does something different:
+    ``standard_fedavg`` is a plain weighted average, which Flower's built-in
+    ``FedAvg`` computes exactly. The hierarchy instead blends:
 
-        new_cohort = cohort + eta_cohort * aggregated_delta
+        new = (1 - eta) * old + eta * aggregated
 
-    an EMA blend, where the aggregation weights are themselves selectable per
-    level (volume / uniform / recency / uncertainty, TD WP4 task 3). Stock FedAvg
-    cannot express that — with eta=0.3 onto a zero cohort it would return 0.5
-    where the blend returns 0.3 — so "run the hierarchy through Flower" means
-    subclassing the strategy, not reusing it.
+    with weights selectable per level (volume, uniform, recency, uncertainty; WP4
+    task 3). Stock FedAvg cannot express that, so the strategy is subclassed. (The
+    fl-ight ``carlos`` branch's ``FedXGBLLRStrategy`` follows the same pattern.)
 
-    This mirrors the pattern in the fl-ight `carlos` branch, whose
-    `FedXGBLLRStrategy` likewise subclasses `FedAvg` to replace the aggregation
-    while keeping Flower's client orchestration.
-
-    `local_finetune` and `population_only` need no strategy at all: the first
-    trains per centre with no coordination, the second does not train.
+    ``local_finetune`` and ``population_only`` need no strategy: the first trains
+    each centre with no coordination and the second does not train.
     """
     import flwr as fl
     from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
@@ -110,15 +84,13 @@ def make_hierarchical_strategy():
     from ..hierarchical.upward_prop import propagate_cohorts_to_population
 
     class HierarchicalEMAStrategy(fl.server.strategy.FedAvg):
-        """Replaces FedAvg's average with the cohort->population EMA blend.
+        """FedAvg with the average replaced by the cohort-to-population blend.
 
-        ``propagate_cohorts_to_population`` is the correct primitive here, not
-        ``propagate_patients_to_cohort``: it consumes **absolute** states with
-        keys shared between server and clients, which is what a Flower client
-        returns. The patient-level function instead maps keys across namespaces
-        (``patient_adapter.*`` -> ``cohort_adapter.*``) and, given
-        cohort-namespaced input, would match nothing and return the state
-        unchanged — silently, with no error.
+        It uses ``propagate_cohorts_to_population``, which takes absolute states
+        with the same keys on server and clients, as a Flower client returns them.
+        ``propagate_patients_to_cohort`` would be wrong here: it renames
+        ``patient_adapter.*`` keys to ``cohort_adapter.*``, so given cohort keys it
+        matches nothing and silently returns the state unchanged.
         """
 
         def __init__(self, *args, reference_state, eta_population=0.1,
@@ -152,25 +124,16 @@ def make_hierarchical_strategy():
 def make_hierarchical_client_class():
     """One Flower client per centre, for the full three-level hierarchy.
 
-    WHY THIS IS SEPARATE FROM ``make_client_class``
-    ----------------------------------------------
-    That one is the ``standard_fedavg`` baseline: its ``fit`` trains a cohort
-    adapter and stops. The hierarchy's client must also run the PATIENT level —
-    instantiate each patient adapter from the cohort state, adapt it, and
-    propagate the accepted deltas back into the cohort — before returning.
+    Besides the cohort step, the client runs the patient level: each patient adapter
+    starts from the cohort state, adapts, and the accepted updates are folded back
+    into the cohort before ``fit`` returns.
 
-    THE PATIENT LEVEL IS LOCAL BY CONSTRUCTION, NOT BY COMPROMISE
-    ------------------------------------------------------------
-    Patients are records inside one institution; they are not network peers and
-    never contact a server. The only boundary that is genuinely a network
-    boundary is cohort <-> population, and that is the one Flower carries. A
-    three-level hierarchy over a two-tier runtime is the correct topology.
+    The patient level stays local on purpose: patients are records inside one
+    institution, not network peers. The only real network boundary is cohort <->
+    population, and that is what Flower carries.
 
-    IT CALLS THE COORDINATOR'S OWN STEPS
-    ------------------------------------
-    ``_cohort_step`` and ``_patient_step`` are invoked rather than reimplemented.
-    Re-deriving a per-centre step inside the client is exactly how the same logic
-    ended up in two copies that drifted apart once already.
+    The client calls the coordinator's own ``_cohort_step`` and ``_patient_step``
+    instead of reimplementing them, so the two paths cannot drift apart.
     """
     import flwr as fl
 
@@ -186,51 +149,42 @@ def make_hierarchical_client_class():
             """One federated round for this centre: refresh, cohort, patients."""
             coord, hid = self.coord, self.hid
             # Downward flow: blend the broadcast population adapter into this
-            # centre's state. Done here because on a real deployment the client
-            # is what receives the broadcast.
+            # centre's state. The client does it because in a real deployment the
+            # client receives the broadcast.
             if parameters is not None and len(parameters) and config.get("refresh"):
                 pop = ndarrays_to_state(parameters, coord.cohort_states[hid])
                 coord._refresh_one_cohort(hid, pop)
 
             log = dict(coord._cohort_step(hid))
-            # Snapshot AFTER cohort training and BEFORE patient feedback — the
-            # reference the axis-4 delta norm is measured against.
+            # Snapshot after cohort training and before patient feedback, for the
+            # axis 4 update size.
             pre = {k: v.clone() for k, v in coord.cohort_states[hid].items()}
             coord._flower_pre_patient[hid] = pre
             if hid in coord.hospital_patient_streams:
                 log.update(coord._patient_step(hid, pre))
             coord._flower_logs[hid] = log
 
-            # Flower's FedAvg weights by this count, so it must be the SAME
-            # ``n_seen`` the in-process path puts into ``cohort_counts``.
+            # Flower's FedAvg weights by this count, so it must be the same n_seen
+            # the in-process path uses.
             n_seen = int(log.get(f"cohort_{hid}_n_seen", 1) or 1)
             return (state_to_ndarrays(coord.cohort_states[hid]),
                     max(n_seen, 1),
                     {"hospital": int(hid), "n_seen": n_seen})
 
         def evaluate(self, parameters, config):
-            # The harness scores every method on identical windows centrally, so
-            # clients report nothing; a placeholder keeps the strategy happy.
+            # The harness scores every method centrally on the same windows, so
+            # clients report nothing here.
             return 0.0, 0, {}
 
     return HierarchicalClient
 
 
 def make_callable_client_class():
-    """A Flower client that delegates local training to a supplied callable.
+    """A Flower client that hands local training to a supplied function.
 
-    WHY GENERIC RATHER THAN ONE CLIENT PER METHOD
-    ---------------------------------------------
-    The two federated methods do not train the same way. ``standard_fedavg``
-    trains a shared cohort adapter with ``_train_one_cohort_step`` (and the
-    distillation teacher when ``use_cl`` is on); the WP4 path trains via
-    ``_local_train_one_hospital``; the hierarchy additionally runs a patient
-    loop. Hard-coding any of them into a client forces the others to be
-    reimplemented next to it — the duplication that has already cost this project
-    a defect, when per-centre state-reinstall logic drifted apart in two copies.
-
-    So this client owns the Flower contract (wire format, ordering, sample
-    counts) and nothing else. The caller owns what "train locally" means.
+    The client handles only the Flower side (wire format, ordering, sample counts);
+    the caller decides what "train locally" means. ``standard_fedavg`` passes its
+    cohort training step (with the distillation teacher when ``use_cl`` is on).
     """
     import flwr as fl
 
@@ -246,9 +200,8 @@ def make_callable_client_class():
         def fit(self, parameters, config):
             state = ndarrays_to_state(parameters, self.reference)
             new_state, n_seen = self.train_fn(state)
-            # Flower's FedAvg weights by this count, so it must match the count
-            # the single-process path uses or the two runtimes would weight
-            # differently and diverge despite identical arithmetic.
+            # Flower's FedAvg weights by this count, so it must match the in-process
+            # count or the two runtimes would weight centres differently.
             return (state_to_ndarrays(new_state), int(max(n_seen, 1)),
                     {"hospital": int(self.hid), "n_seen": int(n_seen)})
 
@@ -259,14 +212,13 @@ def make_callable_client_class():
 
 
 def flower_fedavg_round(server_state, train_fns):
-    """One FedAvg round through Flower: clients train, stock strategy averages.
+    """One FedAvg round through Flower: clients train, the stock strategy averages.
 
     ``train_fns`` maps hospital id -> ``fn(state) -> (new_state, n_seen)``.
 
-    Uses Flower's OWN ``aggregate`` (``sum(n_i * w_i) / sum(n_i)``) rather than
-    an in-tree helper, so ``standard_fedavg`` is aggregated by the framework
-    exactly as the hierarchy's strategy is. That equality is asserted in
-    tests/test_flower_equivalence.py rather than assumed.
+    It uses Flower's own ``aggregate`` (``sum(n_i * w_i) / sum(n_i)``) rather than
+    an in-tree helper, so ``standard_fedavg`` is aggregated by the framework just
+    like the hierarchy. tests/test_flower_equivalence.py checks the result.
     """
     from flwr.server.strategy.aggregate import aggregate
 

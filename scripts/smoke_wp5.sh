@@ -1,13 +1,11 @@
 #!/bin/bash
-# End-to-end WP5 smoke test: all five methods, tiny budget, one cell.
+# End-to-end WP5 smoke test: all five methods, one cell, tiny budget.
 #
-# WHY: a full cell is 17-24 h. This proves the whole pipeline completes and that
-# every column the TD's axes require is actually POPULATED — not merely present
-# in the header. Several axes were silently blank for weeks (delta_cohort,
-# n_eval_windows on ablation runs, the population trajectory), and a header with
-# no value in it looks identical to a metric that was computed.
+# A full cell takes 17-24 h. This checks in minutes that the whole pipeline finishes
+# and that every column the evaluation axes need actually has a value, not just a
+# header (an empty column looks the same as a computed one).
 #
-#   GPU=1 bash scripts/smoke_wp5.sh            # baseline config
+#   GPU=1 bash scripts/smoke_wp5.sh            # default config
 #   GPU=1 ARM="PER_HOSPITAL_SELECTION=true HEAD_BIAS_ONLY=true" bash scripts/smoke_wp5.sh
 set -o pipefail
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -36,7 +34,7 @@ $PROJECT/venv/bin/python - "$CSV" <<'PY'
 import csv, sys
 rows = list(csv.DictReader(open(sys.argv[1])))
 macro = [r for r in rows if r["hospital"] == "MACRO"][0]
-# (column, which TD axis it serves)
+# (column, the evaluation axis it belongs to)
 MACRO_COLS = [
     ("auc_population_only","1"), ("auc_local_finetune","1"),
     ("auc_standard_fedavg","1"), ("auc_top_down_only","1"),
@@ -54,18 +52,16 @@ MACRO_COLS = [
     ("val_positives_per_hospital","-"), ("selected_round_hierarchical","-"),
     ("n_eval_windows","-"), ("patient_adapters_considered","2"),
 ]
-# Required only when the patient layer produced a score at all. On a TERMINAL
-# outcome (hospital_mortality) every pooled patient set is single-class, so the
-# AUROC is correctly WITHHELD and these have no value — blank is the right answer,
-# not a defect. Demanding them unconditionally would push toward reporting a
-# number where none is defined, which is the failure they were added to prevent.
+# Only required when the patient layer produced a score. For a terminal outcome
+# (hospital_mortality) every pooled patient set is single-class, so the AUROC is
+# correctly left blank.
 MACRO_COLS_IF_PATIENT = [
     ("delta_patient_hier","2"),
 ]
 HOSP_COLS_IF_PATIENT = [
     ("patient_cohort_ref_auroc","2"), ("delta_patient_hier_unpaired","2"),
 ]
-# These are written on the PER-HOSPITAL rows only, not the MACRO aggregate.
+# Written on the per-hospital rows only, not on the MACRO row.
 HOSP_COLS = [
     ("fwt_hier_samecentre","3"), ("in_macro","-"),
     ("auroc_ci95_halfwidth_population_only","1"),
@@ -95,8 +91,8 @@ for col, axis in MACRO_COLS_ACTIVE:
     if not ok:
         bad.append((col, axis, "MACRO"))
 for col, axis in list(HOSP_COLS) + list(HOSP_COLS_ACTIVE):
-    # populated on at least one centre; a per-centre metric can legitimately be
-    # blank where that centre had no evaluable data.
+    # Must have a value on at least one centre; a centre with no usable data can be
+    # blank.
     vals = [r.get(col) for r in hosp]
     ok = any(v not in (None, "") for v in vals)
     shown = next((v for v in vals if v not in (None, "")), None)
@@ -107,7 +103,7 @@ print()
 if bad:
     print("  FAIL — populated header but no value:", bad)
     sys.exit(1)
-# Axis 2 needs per-patient rows, and they cannot be reconstructed after a run.
+# Axis 2 needs the per-patient rows, which cannot be rebuilt after a run.
 import os
 prec = os.path.join(os.path.dirname(sys.argv[1]), "patient_records.csv")
 if os.path.exists(prec):

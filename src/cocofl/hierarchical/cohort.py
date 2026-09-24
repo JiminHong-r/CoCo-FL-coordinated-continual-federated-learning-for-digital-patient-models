@@ -1,16 +1,10 @@
-"""Cohort-level adapter training (Spec WP4 task 1).
+"""Cohort-level adapter training (WP4 task 1).
 
-Each clinical centre (hospital) trains its own ``cohort_adapter`` on top of the
-frozen population backbone, using its local patient slice (assigned via
-Dirichlet partitioning).
-
-Training mode is configurable:
-- ``downstream``  : BCE on a task label (mortality / readmission / ICU)
-- ``lm``          : next-token CE on the patient timeline
-
-Returns the per-cohort adapter state dicts, which the coordinator then uses
-for both downstream patient adaptation and upward propagation into the
-population model.
+Each centre trains its own ``cohort_adapter`` on top of the frozen population
+backbone, using that centre's patients. The objective is either ``downstream`` (BCE
+on a task label) or ``lm`` (next-token cross-entropy on the timeline). The resulting
+states are used for patient adaptation and for the upward step into the population
+model.
 """
 from __future__ import annotations
 
@@ -35,10 +29,10 @@ class CohortConfig:
     local_epochs: int = 1
     local_steps_per_epoch: int | None = None
     objective: str = "downstream"   # "downstream" | "lm"
-    # Catastrophic-forgetting mitigation (Spec WP4 task 4).
-    # "distill" : KD against teacher (population for cohort, cohort for patient)
-    # "ewc"     : λ/2 · Σ Fisher_i · (θ_i - θ*_i)^2 with θ* = pre-round snapshot
-    # "replay"  : alpha · BCE on replay buffer drawn from population
+    # Continual-learning strategy (WP4 task 4):
+    #   "distill"  KD towards the level above (population for cohorts)
+    #   "ewc"      lambda/2 * sum F_i (theta_i - theta*_i)^2, theta* = state before the round
+    #   "replay"   alpha * BCE on a batch from the replay buffer
     cl_strategy: str = "none"        # "none" | "distill" | "ewc" | "replay"
     cl_alpha: float = 0.3            # weight of the CL term in the total loss
     cl_temperature: float = 2.0      # softmax temperature for KD
@@ -46,36 +40,20 @@ class CohortConfig:
     cl_replay_capacity: int = 256
     cl_replay_batch_size: int = 8
     cl_fisher_batches: int = 8
-    # Positive-class weight for the task BCE. WP3 fits the population head with
-    # a class-weighted loss on a stratified draw; adapting it here with an
-    # UNWEIGHTED loss on a centre's natural ~2 % prevalence pulls that head back
-    # toward the base rate, so adaptation degrades a well-calibrated model and
-    # "no adaptation" wins. None = unweighted (the old behaviour).
+    # Positive-class weight for the task BCE. The population head was fitted with a
+    # class-weighted loss; training here without one on a centre's ~2 % prevalence
+    # pulls predictions back towards the base rate. None = unweighted.
     pos_weight: float | None = None
-    # Whether adaptation trains the classifier head as well as the adapter.
-    # False (default) is the architecture the TD specifies: the population model
-    # (backbone + its WP3-fitted head) is frozen and the ADAPTERS carry the
-    # adaptation. Retraining a head that was fitted on 20,000 class-balanced
-    # reserve windows using ~16,000 windows of one centre's 2 %-prevalence data
-    # can only degrade it, which is why adapted methods scored BELOW the frozen
-    # population model. Keeping it frozen also restores adapter-only transfer,
-    # so the communication-efficiency figure reflects what actually travels.
-    #
-    # NB: freezing the head is THIS PROJECT'S choice, not a requirement of the
-    # task description. The TD uses the word "frozen" exactly once, describing
-    # the *population-only baseline* ("frozen population model applied directly
-    # without any adaptation"); WP4 task 1 says only "design update rules for
-    # centre-specific fine-tuning (e.g., via lightweight adapters or low-rank
-    # updates)" — adapters are an example, not a mandate. Earlier comments here
-    # claimed the TD specified this; it does not.
+    # Also train the classifier head? False (default): the population model and its
+    # head stay frozen and only the adapter learns. Retraining the head on one
+    # centre's data made results worse, and a frozen head means only the adapter is
+    # exchanged. Freezing the head is this project's choice; the TD suggests
+    # adapters as one option, not a rule.
     train_head: bool = False
-    # Middle ground between a fully frozen head and a fully trained one: unfreeze
-    # ONLY the head's bias terms. A class-aware split's heterogeneity is largely
-    # label shift (per-centre positive rate 0.42 %-3.10 %), and the correct
-    # response to a prior shift is an intercept change. Freezing the intercept
-    # forces the adapter to emulate it by distorting features, which is what the
-    # measurements show costs ranking while buying calibration. Off by default:
-    # enabling it changes the method, not a defect.
+    # Middle ground: train only the head's intercepts. Much of the class-aware
+    # split's heterogeneity is a difference in base rate (0.42 %-3.10 % positive by
+    # centre), and the right fix for that is an intercept change. Off by default; it
+    # changes the method.
     train_head_bias_only: bool = False
 
 
@@ -87,16 +65,15 @@ def _train_one_cohort_step(classifier: TFNDownstreamClassifier,
                             teacher: TFNDownstreamClassifier | None = None,
                             replay_buffer=None,
                             ) -> tuple[int, float]:
-    """Run ``cfg.local_epochs`` of local training; return (n_seen, avg_loss).
+    """Run ``cfg.local_epochs`` of local training; return ``(n_seen, avg_loss)``.
 
-    If ``teacher`` is provided AND ``cfg.cl_strategy == "distill"``, adds a
-    BCE-style knowledge-distillation term against the teacher's soft labels:
+    With a ``teacher`` and ``cfg.cl_strategy == "distill"``, a distillation term
+    towards the teacher's soft labels is added (WP4 task 4):
 
         loss = base_loss + cl_alpha * KD(student/T, teacher/T) * T^2
 
-    Used for Spec WP4 task 4 (continual-learning mitigation of catastrophic
-    forgetting). For cohort training, the teacher is typically the frozen
-    population classifier; for patient training, it is the cohort model.
+    For cohorts the teacher is the frozen population model; for patients it is the
+    cohort model.
     """
     classifier.train()
     trainable = [p for p in classifier.parameters() if p.requires_grad]
@@ -115,8 +92,8 @@ def _train_one_cohort_step(classifier: TFNDownstreamClassifier,
             p.requires_grad_(False)
     T = cfg.cl_temperature
 
-    # EWC setup: snapshot current trainable parameters (θ*) and compute the
-    # diagonal Fisher on the LOCAL loader before training starts.
+    # EWC: snapshot the trainable parameters (theta*) and compute the diagonal
+    # Fisher on the local loader before training.
     ewc_theta_star: dict[str, torch.Tensor] | None = None
     ewc_fisher: dict[str, torch.Tensor] | None = None
     if use_ewc:
@@ -176,7 +153,7 @@ def _train_one_cohort_step(classifier: TFNDownstreamClassifier,
             else:
                 raise ValueError(f"unknown objective: {cfg.objective!r}")
 
-            # EWC penalty: λ/2 · Σ F_i (θ_i - θ*_i)^2
+            # EWC penalty: lambda/2 * sum F_i (theta_i - theta*_i)^2
             if use_ewc and ewc_fisher is not None:
                 ewc_pen = torch.zeros((), device=device)
                 for n_, p_ in classifier.named_parameters():
@@ -185,7 +162,7 @@ def _train_one_cohort_step(classifier: TFNDownstreamClassifier,
                     ewc_pen = ewc_pen + (ewc_fisher[n_] * (p_ - ewc_theta_star[n_]).pow(2)).sum()
                 loss = loss + 0.5 * cfg.cl_lambda * ewc_pen
 
-            # Replay: BCE on a random batch sampled from the replay buffer
+            # Replay: BCE on a random batch from the replay buffer
             if use_replay and cfg.objective == "downstream":
                 rx, re_, rcat, rnum, ry = replay_buffer.sample(cfg.cl_replay_batch_size)
                 rx = rx.to(device); re_ = re_.to(device); rcat = rcat.to(device)
@@ -218,10 +195,10 @@ def train_cohort_adapter(
     device: torch.device,
     label_fn: Callable | None = None,
 ) -> tuple[dict[str, torch.Tensor], int, float]:
-    """Train one centre's cohort adapter from scratch (template's current state).
+    """Train one centre's cohort adapter, starting from the template's current state.
 
-    Returns ``(cohort_state, n_seen, avg_loss)`` — state dict contains only the
-    ``cohort_adapter.*`` keys (the population backbone is unchanged).
+    Returns ``(cohort_state, n_seen, avg_loss)``. The state holds only the
+    ``cohort_adapter.*`` keys; the backbone does not change.
     """
     clf = copy.deepcopy(template)
     attach_ffn_adapter(clf.backbone, bottleneck=cfg.bottleneck, attr="cohort_adapter")
@@ -240,10 +217,10 @@ def train_all_cohorts(
     device: torch.device,
     label_fn: Callable | None = None,
 ) -> dict[int, tuple[dict[str, torch.Tensor], int, float]]:
-    """Train an independent cohort adapter for each hospital.
+    """Train a separate cohort adapter for each hospital.
 
-    No cross-hospital aggregation here — this is the per-centre stage. The
-    coordinator can later aggregate the deltas back into the population via
+    No aggregation across hospitals happens here. The coordinator can fold the
+    results into the population later with
     ``upward_prop.propagate_cohorts_to_population``.
     """
     result: dict[int, tuple[dict[str, torch.Tensor], int, float]] = {}

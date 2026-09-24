@@ -1,18 +1,14 @@
-"""Two method changes aimed at letting adaptation actually help. Both OFF by default.
+"""Two optional method changes, both off by default.
 
-**Per-hospital round selection.** Model selection scored ``macro_average`` of the
-per-hospital validation AUROCs — one scalar — and restored every centre at that
-one round. Under a class-aware split the centres differ materially (population
-AUROC 0.9072 / 0.8300 / 0.8949), so a round chosen for the largest centre is
-imposed on the others. That contradicts the project's own premise that centres
-need centre-specific models, inside the step that picks the model.
+Per-hospital round selection: by default one round (best macro validation AUROC) is
+used for every centre. Under the class-aware split the centres differ a lot
+(population AUROC 0.9072 / 0.8300 / 0.8949), so the round that suits one centre is
+forced on the others.
 
-**Bias-only head adaptation.** The head is frozen during adaptation, so a centre
-whose positive rate is 0.42 % vs another's 3.10 % can only express that shift by
-distorting features through a fixed boundary — measured as ‖Δ‖=5.05 buying
-ECE 0.2527→0.1570 at a cost of 0.016 AUROC. Unfreezing only the intercepts makes
-the correction expressible for a few floats per round, preserving adapter-only
-transfer (the full head file is ~529 KB against the adapter's 264 KB payload).
+Bias-only head training: with the head frozen, a centre whose positive rate is 0.42
+% against another's 3.10 % can only express the shift by distorting features.
+Training only the intercepts fixes it for a few numbers per round, so only the
+adapter (plus these) is exchanged.
 """
 from __future__ import annotations
 
@@ -26,7 +22,7 @@ from cocofl.hierarchical.cohort import CohortConfig
 from cocofl.hierarchical.coordinator import CoordinatorConfig
 
 
-# --- defaults must not change the method ---------------------------------
+# Defaults must not change the method
 
 def test_both_changes_are_off_by_default():
     assert CohortConfig().train_head_bias_only is False
@@ -40,7 +36,7 @@ def test_bias_only_does_not_imply_training_the_whole_head():
     assert cfg.train_head is False, "bias-only must not unfreeze the weights too"
 
 
-# --- bias-only: which parameters are selected -----------------------------
+# Bias-only: which parameters are selected
 
 class _FakeBackbone(nn.Module):
     def __init__(self):
@@ -50,8 +46,7 @@ class _FakeBackbone(nn.Module):
 
 
 class _FakeClf(nn.Module):
-    """Minimal stand-in: a head plus a backbone carrying a real FFN adapter,
-    since ``level_state_dict`` reads both namespaces."""
+    """Minimal stand-in: a head plus a backbone with a real FFN adapter, since ``level_state_dict`` reads both."""
 
     def __init__(self, with_adapter: bool = True):
         super().__init__()
@@ -100,10 +95,10 @@ def test_full_head_still_available_when_explicitly_requested():
     assert any(k.endswith("weight") for k in head_keys), "unchanged legacy path"
 
 
-# --- per-hospital selection: the semantics that make it safe --------------
+# Per-hospital selection: the properties that make it safe
 
 def _pick(per_hosp_val_by_round, use_per_hospital):
-    """Mirrors the harness: round 0 is always a candidate."""
+    """Same rule as the harness: round 0 is always a candidate."""
     hids = per_hosp_val_by_round[0].keys()
     if use_per_hospital:
         return {h: max(range(len(per_hosp_val_by_round)),
@@ -113,8 +108,8 @@ def _pick(per_hosp_val_by_round, use_per_hospital):
     return {h: best for h in hids}
 
 
-# Round 1 wins on macro (0.725 > 0.700) because hospital 0 gains more than
-# hospital 1 loses — the exact situation where one shared round is wrong.
+# Round 1 wins on macro (0.725 > 0.700) because hospital 0 gains more than hospital
+# 1 loses: exactly the case where one shared round is wrong.
 _SPLIT_PEAKS = [{0: 0.80, 1: 0.60}, {0: 0.95, 1: 0.50}]
 
 
@@ -137,7 +132,7 @@ def test_per_hospital_selection_beats_global_for_the_dragged_centre():
 
 
 def test_per_hospital_selection_never_lands_below_a_centres_round_0():
-    """The safety property: round 0 is a candidate for every centre separately."""
+    """Round 0 is a candidate for each centre separately, so no centre ends below its own start."""
     rounds = [{0: 0.80, 1: 0.70}, {0: 0.10, 1: 0.05}, {0: 0.20, 1: 0.02}]
     picked = _pick(rounds, use_per_hospital=True)
     for h, r in picked.items():
@@ -150,6 +145,6 @@ def test_the_two_agree_when_centres_peak_together():
 
 
 def test_coordinator_config_still_defaults_to_shared_weighting():
-    """Guard against these edits changing unrelated defaults."""
+    """These changes must not alter unrelated defaults."""
     c = CoordinatorConfig()
     assert c.patient_weighting_scheme is None and c.cohort_weighting_scheme is None

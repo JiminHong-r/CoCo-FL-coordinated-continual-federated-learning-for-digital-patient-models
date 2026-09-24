@@ -1,14 +1,9 @@
-"""The WP5 harness must never score a method on windows it trained on.
+"""The harness must never score a method on windows it trained on.
 
-The ``splits_dir`` path (every shipped script) reads train/val/test from three
-disjoint partitions of the fixed split, so it was always safe. The inline
-Dirichlet fallback — what a bare ``cocofl_evaluate`` call with no ``splits_dir``
-takes — built each hospital's eval loader *from that hospital's train loader
-indices*, so the eval set was literally the train set. Nothing failed; the
-AUROCs simply came out optimistic.
-
-These tests pin the invariant at the level it actually matters: train and eval
-index sets must be disjoint.
+With ``splits_dir`` (every shipped script) train, val and test come from separate
+partitions. The inline Dirichlet path, used when ``splits_dir`` is not given, once
+built its eval set from the training indices, which made AUROCs look better than
+they were. These tests check that the train and eval indices do not overlap.
 """
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ import random
 
 
 def _split_like_harness(indices, seed=42, frac_eval=0.3):
-    """Mirrors the inline branch's disjoint hold-out."""
+    """Same disjoint hold-out as the inline branch."""
     idxs = list(indices)
     random.Random(seed).shuffle(idxs)
     n_eval = max(1, int(len(idxs) * frac_eval))
@@ -40,7 +35,7 @@ def test_inline_split_holds_out_a_nonempty_eval_set():
 
 
 def test_single_window_hospital_degrades_without_crashing():
-    """A centre with one window cannot have a disjoint split; it must not crash."""
+    """A centre with one window cannot be split; it must not crash."""
     train_idx, eval_idx = _split_like_harness(range(1))
     assert eval_idx == [0]
     assert train_idx == [0], "falls back rather than leaving training empty"

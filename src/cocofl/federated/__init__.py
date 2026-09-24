@@ -1,14 +1,11 @@
-"""Federated learning across simulated hospital silos.
+"""Simulated hospitals and the federated runtime.
 
-Partitions the tokenized patient cohort into N silos via a Dirichlet
-distribution (low alpha => skewed, high alpha => near-IID), trains one FFN
-adapter per silo, and averages adapter weights round-by-round (FedAvg).
-
-The population backbone is frozen — only adapter (and optionally classifier
-head) parameters travel between silos and server.
-
-This is the flat / non-hierarchical baseline. The hierarchical bidirectional
-variant lives in :mod:`cocofl.hierarchical`.
+``hospital_split`` divides patients across hospitals with a Dirichlet draw (low
+alpha = skewed, high alpha = close to IID), ``fixed_splits`` loads the pre-computed
+splits, and ``flower_app`` runs the federated steps through Flower. Only adapter
+parameters (and the head, if trained) travel between hospitals and the server; the
+backbone stays frozen. The methods themselves are in
+:mod:`cocofl.evaluation.baselines` and :mod:`cocofl.hierarchical`.
 """
 from .hospital_split import (
     dirichlet_split_patients,

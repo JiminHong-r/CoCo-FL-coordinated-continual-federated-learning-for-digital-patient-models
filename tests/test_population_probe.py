@@ -1,11 +1,10 @@
-"""The population probe must survive class imbalance.
+"""The population probe must cope with class imbalance.
 
-The failure this guards against is not a crash: the old probe ran to completion
-and reported 0.589 AUROC on hospital_mortality. It drew training windows
-uniformly (so a 2 %-prevalence task got ~60 positives), weighted both classes
-equally, and kept the checkpoint with the lowest validation *loss* — which on
-an imbalanced task is the one closest to predicting the base rate for everyone.
-Each of those three is pinned here.
+The old probe did not crash; it reported 0.589 AUROC on hospital_mortality. It drew
+training windows at random (about 60 positives at 2 % prevalence), weighted both
+classes equally, and kept the checkpoint with the lowest validation loss, which on
+imbalanced data is the one closest to predicting the base rate. Each of those three
+is tested here.
 """
 from __future__ import annotations
 
@@ -23,11 +22,10 @@ TIMELINE_SIZE = 16
 
 
 class FakeTaskDataset:
-    """Index layout of an ``InferenceDataset`` task, with a rare positive class.
+    """Index layout of an ``InferenceDataset`` task with a rare positive class.
 
-    ``outcome_indices`` point at token positions; a position holding token
-    ``POS_TOKEN`` is a positive outcome, which is exactly how the real datasets
-    encode a label.
+    ``outcome_indices`` point at token positions; a position holding ``POS_TOKEN``
+    is a positive outcome, as in the real datasets.
     """
 
     POS_TOKEN = 7
@@ -42,9 +40,9 @@ class FakeTaskDataset:
 
         self.start_indices = torch.arange(n_samples) * 2
         self.outcome_indices = self.start_indices + 1
-        # The first n_pos samples carry the positive outcome token.
+        # The first n_pos samples get the positive outcome token.
         self.tokens[self.outcome_indices[:n_pos]] = self.POS_TOKEN
-        # Optional: push some positives beyond a label horizon.
+        # Optionally move some positives past a label horizon.
         if horizon_ok is not None:
             for i in range(n_pos):
                 dt = 500 if i < horizon_ok else 10_000_000
@@ -68,17 +66,17 @@ def test_window_labels_match_outcome_tokens():
 
 
 def test_window_labels_apply_the_label_horizon():
-    """An outcome past the horizon is a negative — same rule as label_from_batch."""
+    """An outcome past the horizon is negative, as in label_from_batch."""
     ds = FakeTaskDataset(n_samples=200, n_pos=8, horizon_ok=3)
     y = window_labels(ds, {"POS"}, horizon_us=1000)
     assert y.sum() == 3, "only outcomes inside the horizon stay positive"
 
 
 def test_stratified_subsample_keeps_every_positive():
-    """The uniform draw is what starved the low-prevalence tasks.
+    """The stratified draw must keep every positive.
 
-    At 4 % prevalence a uniform 100-of-500 draw carries ~4 positives; the
-    stratified draw must carry all 20 that exist.
+    At 4 % prevalence a random 100-of-500 draw has about 4 positives; the stratified
+    draw must have all 20.
     """
     y = np.zeros(500, dtype=np.int8)
     y[:20] = 1
@@ -91,7 +89,7 @@ def test_stratified_subsample_keeps_every_positive():
 
 
 def test_stratified_subsample_caps_positives_at_half_the_budget():
-    """A high-prevalence task must not end up with an all-positive draw."""
+    """A common outcome must not give an all-positive draw."""
     y = np.ones(500, dtype=np.int8)
     y[:50] = 0
     sel = stratified_subsample(y, range(len(y)), n_total=100, rng=np.random.default_rng(0))
@@ -100,7 +98,7 @@ def test_stratified_subsample_caps_positives_at_half_the_budget():
 
 
 def test_stratified_subsample_respects_the_candidate_pool():
-    """Only windows inside the reserve may be drawn (leakage-free by construction)."""
+    """Only windows inside the given pool (e.g. the reserve) may be drawn."""
     y = np.zeros(500, dtype=np.int8)
     y[:20] = 1
     pool = list(range(0, 250))
@@ -109,11 +107,11 @@ def test_stratified_subsample_respects_the_candidate_pool():
 
 
 def test_balanced_head_beats_the_base_rate_predictor_when_imbalanced():
-    """The whole point: a 2 %-prevalence signal must still be learnable.
+    """A signal at 2 % prevalence must still be learnable.
 
-    The features carry a real (noisy) signal. An unweighted head on this data
-    minimises its loss by predicting the majority class; the balanced head has
-    to recover the ranking, so AUROC must land well above chance.
+    The features carry a real, noisy signal. An unweighted head would just predict
+    the majority class; the balanced head has to recover the ranking, so AUROC must
+    be well above chance.
     """
     rng = np.random.default_rng(0)
     n, d = 4000, 20
@@ -133,7 +131,7 @@ def test_balanced_head_beats_the_base_rate_predictor_when_imbalanced():
 
 
 def test_balanced_head_survives_a_single_class_validation_split():
-    """Undefined val AUROC must not crash selection, and must not drive it."""
+    """An undefined validation AUROC must neither crash selection nor drive it."""
     rng = np.random.default_rng(0)
     X = rng.normal(size=(200, 5))
     y = (rng.random(200) < 0.3).astype(np.int8)
@@ -143,20 +141,19 @@ def test_balanced_head_survives_a_single_class_validation_split():
 
 
 def test_filter_by_patients_keys_on_the_token_index(tmp_path):
-    """The reserve / global-test filters must map a sample to its OWN patient.
+    """The reserve and global-test filters must map each sample to its own patient.
 
-    ``start_indices[i]`` is a token index; ``patient_id_at_idx`` must be read at
-    that index, not at ``i``. Reading at ``i`` returns an unrelated patient and
-    the filter — the thing that makes the baseline leakage-free — becomes noise.
+    ``start_indices[i]`` is a token index, and ``patient_id_at_idx`` must be read
+    there, not at ``i``; reading at ``i`` gives an unrelated patient.
     """
     import json
 
     from cocofl.downstream.finetune import filter_by_patients
 
     ds = FakeTaskDataset(n_samples=10, n_pos=2)
-    # Token index 0..19 belong to patient 100; 20+ to patient 200. Samples
-    # 0..9 sit at token indices 0,2,...,18 — so ALL of them are patient 100,
-    # which is only visible if the lookup uses start_indices.
+    # Tokens 0-19 belong to patient 100 and 20+ to patient 200. Samples 0-9 sit at
+    # tokens 0, 2, ..., 18, so all of them are patient 100, which only shows if the
+    # lookup uses start_indices.
     ds.patient_id_at_idx = torch.tensor([100] * 20 + [200] * (len(ds.tokens) - 20))
 
     path = tmp_path / "pids.json"

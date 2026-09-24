@@ -1,12 +1,10 @@
-"""TFN-aware continual learning regularisers for per-patient personalisation.
+"""Continual-learning regularisers for TFN batches.
 
-Parallel to ``cocofl.personalisation.continual.*`` but adapted to TFN batches:
-``((x, elapsed, cat, num), y_dict)``.
-
-All three regularisers return an ``extra_loss_fn(clf_fn, x, y, base_loss)``
-matching ``loop._train_classifier``'s callback contract. ``clf_fn`` is the
-input-only closure produced by ``make_input_only_classifier`` so neither EWC
-nor Distill nor Replay needs to know TFN's expanded signature.
+Each of the three (EWC, distillation, replay) returns an ``extra_loss_fn(clf_fn, x,
+y, base_loss)`` matching the callback of ``loop._train_classifier``. ``clf_fn`` is
+the input-only wrapper from ``make_input_only_classifier``, so the regularisers
+never deal with TFN's extra arguments. Batches are ``((x, elapsed, cat, num),
+y_dict)``.
 """
 from __future__ import annotations
 
@@ -96,8 +94,7 @@ class EWCRegularizerTFN:
         return 0.5 * self.lambda_ewc * total
 
     def as_extra_loss_fn(self):
-        """``(clf_fn, x, y, base_loss) -> loss``. We ignore clf_fn since the
-        penalty operates on the underlying classifier's parameters directly."""
+        """``(clf_fn, x, y, base_loss) -> loss``. ``clf_fn`` is unused: the penalty works on the classifier's parameters directly."""
         clf = self._classifier_ref
         if clf is None:
             raise RuntimeError("EWCRegularizerTFN missing classifier ref")
@@ -150,9 +147,7 @@ class DistillationLossTFN:
 # --- Replay ------------------------------------------------------------------
 
 class ReplayBufferTFN:
-    """Reservoir of (x, elapsed, cat, num, label) samples drawn from the population
-    train loader before personalisation begins. Used to compute a replay-BCE term
-    on each personalisation step."""
+    """Buffer of (x, elapsed, cat, num, label) samples taken from the training loaders before adaptation starts; used for a replay BCE term at each step."""
 
     def __init__(self, capacity: int = 256):
         self.capacity = capacity
@@ -161,15 +156,14 @@ class ReplayBufferTFN:
     def fill_from(self, loader, label_fn) -> None:
         """Collect samples until ``capacity`` is reached.
 
-        Note: ETHOS tokenisation produces per-patient *static context* tokens
-        whose count varies (DOB → 2 tokens vs single-code → 1 token), so the
-        same dataset can yield x tensors of different shapes. The buffer
-        commits to the *first* shape it sees and skips any item that doesn't
-        match — across multiple ``fill_from`` calls too (e.g., when the
-        coordinator fills from each hospital's loader in turn).
+        The number of static-context tokens differs between patients (e.g. 2 tokens
+        for a date of birth, 1 for a single code), so windows can have different
+        shapes. The buffer keeps the first shape it sees and skips samples of any
+        other shape, also across several ``fill_from`` calls (one per hospital
+        loader).
         """
-        # Persist the target shape across calls so different hospital loaders
-        # contribute compatibly-shaped items.
+        # Keep the target shape across calls, so every hospital adds matching
+        # samples.
         target_shape = self.items[0][0].shape if self.items else None
         for batch in loader:
             if batch is None:
@@ -194,7 +188,7 @@ class ReplayBufferTFN:
                     return
 
     def sample(self, n: int) -> tuple:
-        """Returns batched tensors (xs, elapsed, cats, nums, ys)."""
+        """Return batched tensors ``(xs, elapsed, cats, nums, ys)``."""
         if not self.items:
             raise ValueError("ReplayBufferTFN: empty buffer")
         n = min(n, len(self.items))
@@ -210,16 +204,15 @@ class ReplayBufferTFN:
 def replay_loss_tfn(buffer: ReplayBufferTFN, classifier: TFNDownstreamClassifier,
                     batch_size: int = 8, device: torch.device | None = None,
                     alpha: float = 0.5):
-    """Returns an ``extra_loss_fn(clf_fn, x, y, base_loss)`` that adds
-    ``alpha * BCE(student(replay), replay_labels)``."""
+    """Return an ``extra_loss_fn(clf_fn, x, y, base_loss)`` that adds ``alpha * BCE(student(replay), replay_labels)``."""
     def _fn(clf_fn, x, y, base_loss):
         xs, elapsed, cats, nums, ys = buffer.sample(batch_size)
         if device is not None:
             xs, elapsed, cats, nums, ys = (
                 xs.to(device), elapsed.to(device), cats.to(device), nums.to(device), ys.to(device),
             )
-        # Use the FULL classifier (with patient-specific static features replaced
-        # by replay sample's own static features — closer to true population recall).
+        # Use the full classifier with each replay sample's own static features,
+        # which is closer to recalling the population.
         logits = classifier(
             input_ids=xs, elapsed_times=elapsed,
             static_categorical=cats, static_numerical=nums,

@@ -249,7 +249,14 @@ class InferenceDataset(TimelineDataset, abc.ABC):
         fill_unmatched: int | None = None,
         shift: int = 0,
     ) -> th.Tensor:
-        """TODO: Write a docstring, because this function is hell."""
+        """For each value in ``input``, the first element of ``ordered_sequence`` greater than it.
+
+        Used to pair each prediction point with the next outcome token, e.g. each
+        admission with the following discharge or death. ``ordered_sequence`` must
+        be sorted. ``shift`` moves the match that many positions further along.
+        Values with no later element get ``fill_unmatched`` if it is given;
+        otherwise indexing fails.
+        """
         ordered_sequence_indices = th.searchsorted(ordered_sequence, input, right=True)
         if shift:
             ordered_sequence_indices += shift

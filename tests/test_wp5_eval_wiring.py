@@ -1,9 +1,8 @@
-"""End-to-end wiring of the WP5 harness knobs that control sample size.
+"""End-to-end wiring of the harness settings that control sample size.
 
-Runs the real ``run_hierarchical_bidir`` and the real baselines against a tiny
-TFN backbone, so the plumbing added for the full-eval run (separate trajectory
-loaders, explicit patient pooling, recorded eval-set sizes) is exercised rather
-than assumed.
+Runs the real ``run_hierarchical_bidir`` and baselines on a tiny TFN backbone, to
+check the separate trajectory loaders, explicit patient pooling and recorded
+eval-set sizes.
 """
 from __future__ import annotations
 
@@ -83,9 +82,7 @@ def _loaders(ds, n_test, n_traj):
 
 
 def test_trajectory_loader_absorbs_the_per_round_passes():
-    """The point of splitting traj from test: the reported test set is touched
-    once, not 2x per round. Without this, uncapping the test set multiplies its
-    cost by the round count."""
+    """The test set is read once; the per-round passes go to the trajectory loader, so a full-size test set stays affordable."""
     ds = _dataset()
     device = torch.device("cpu")
     test_lds, traj_lds, train_lds = _loaders(ds, n_test=0, n_traj=4)
@@ -104,16 +101,15 @@ def test_trajectory_loader_absorbs_the_per_round_passes():
     assert res.n_rounds == 3
     # Test set: exactly one pass, at the end.
     assert counted_test[0].windows == len(ds)
-    # Trajectory set: 2 passes per round (pre/post patient) + 1 val pass, plus
-    # ONE round-0 validation pass. Round 0 is the un-adapted state (identity
-    # adapter = the population model); scoring it makes it a model-selection
-    # candidate, which is what stops a degrading run being reported at its
-    # final round. See tests/test_model_selection.py.
+    # Trajectory set: 2 passes per round (before and after patient feedback) + 1
+    # validation pass, plus one round-0 validation pass. Round 0 (identity adapter =
+    # the population model) is scored so it can be selected; see
+    # tests/test_model_selection.py.
     assert counted_traj[0].windows == (3 * 3 + 1) * 4
 
 
 def test_traj_defaults_to_the_test_loader():
-    """Omitting traj_loaders must reproduce the old behaviour exactly."""
+    """Without traj_loaders, the test loader is used for the trajectory too."""
     ds = _dataset()
     device = torch.device("cpu")
     test_lds, _, train_lds = _loaders(ds, n_test=4, n_traj=4)
@@ -125,10 +121,9 @@ def test_traj_defaults_to_the_test_loader():
         eval_loaders=counted, val_loaders=counted,
         max_rounds=2, patience=999, min_rounds=2,
     )
-    # 1 round-0 val pass + 2 rounds x (2 trajectory + 1 val) + 1 final pass
-    # = 8 passes over 4 windows. The round-0 pass scores the un-adapted state so
-    # it can be selected against (tests/test_model_selection.py). That multiple
-    # is exactly why an uncapped test set needs a separate traj loader.
+    # 1 round-0 validation pass + 2 rounds x (2 trajectory + 1 validation) + 1 final
+    # pass = 8 passes over 4 windows. That multiple is why a full test set needs a
+    # separate trajectory loader.
     assert counted[0].windows == 8 * 4
 
 
@@ -138,9 +133,8 @@ def test_patient_eval_n_is_explicit_and_overrides_the_n_iters_heuristic():
     test_lds, traj_lds, train_lds = _loaders(ds, n_test=8, n_traj=4)
     streams = {0: build_patient_streams(ds, [0, 1], collate, min_samples=4,
                                         max_patients=2, eval_batch_size=4)}
-    # Streams are (patient_id, fit, val, eval): acceptance is decided on val so
-    # eval stays a true held-out slice, and the id is carried for axis 2 subgroup
-    # analysis.
+    # Streams are (patient_id, fit, val, eval): acceptance is decided on val so eval
+    # stays held out, and the id is kept for the axis 2 subgroup analysis.
     counted = [CountingLoader(e) for _, _, _, e in streams[0]]
     streams = {0: [(pid, t, v, c) for (pid, t, v, _), c in zip(streams[0], counted)]}
 
@@ -149,7 +143,7 @@ def test_patient_eval_n_is_explicit_and_overrides_the_n_iters_heuristic():
         eval_loaders=test_lds, val_loaders=traj_lds, traj_loaders=traj_lds,
         patient_eval_n=2, max_rounds=1, patience=999, min_rounds=1,
     )
-    # Both patient streams pooled, not the legacy n_iters//10+1 = 1.
+    # Both patient streams are pooled.
     assert all(c.windows > 0 for c in counted)
 
 
@@ -176,13 +170,10 @@ def test_uncapped_eval_scores_every_window():
 
 
 def test_use_flower_refuses_to_fall_back_when_flwr_is_missing():
-    """A requested runtime that silently degrades is worse than a crash.
+    """If Flower is requested but not installed, the harness must raise, not quietly run the in-process path.
 
-    Every config knob in the harness is a ``getattr(cfg, name, default)``, so a
-    config that never arrives looks exactly like one deliberately left off. That
-    cost two bring-up runs: each reported CELL OK with every axis column
-    populated, having executed the in-process path while the operator believed
-    Flower was in use. The guard must therefore RAISE, not warn and continue.
+    Every setting is read with a default, so a missing setting looks like one left
+    off on purpose; a warning would let a run be credited to the wrong runtime.
     """
     import inspect
 

@@ -1,12 +1,9 @@
-"""Patient-level adapter training (Spec WP4 task 2).
+"""Patient-level adapter training (WP4 task 2).
 
-Each patient's model is *initialised from their cohort's model* (not directly
-from the population). The patient adapter is attached on top of the cohort
-adapter and trained with higher learning rate on patient-specific data.
-
-After patient training completes, we also compute the patient's adapter
-*delta* (final - initial) which the coordinator can aggregate into the
-cohort's adapter for upward propagation (Spec WP4 task 3).
+Each patient's model starts from their cohort's model. A patient adapter sits on top
+of the cohort adapter and trains at a higher learning rate on that patient's data.
+Its change (final minus initial) is returned so the coordinator can fold it into the
+cohort adapter (WP4 task 3).
 """
 from __future__ import annotations
 
@@ -31,28 +28,20 @@ class PatientConfig:
     weight_decay: float = 0.0
     grad_clip: float = 1.0
     n_iters: int = 100
-    # Catastrophic-forgetting mitigation (Spec WP4 task 4). For the patient
-    # level the natural reference (teacher / θ*) is the COHORT model.
+    # Continual-learning strategy (WP4 task 4). At the patient level the reference
+    # (teacher, or theta* for EWC) is the cohort model.
     cl_strategy: str = "none"        # "none" | "distill" | "ewc" | "replay"
     cl_alpha: float = 0.3
     cl_temperature: float = 2.0
     cl_lambda: float = 100.0
     cl_replay_batch_size: int = 8
     cl_fisher_batches: int = 4
-    # Positive-class weight for the task BCE. WP3 fits the population head with
-    # a class-weighted loss on a stratified draw; adapting it here with an
-    # UNWEIGHTED loss on a centre's natural ~2 % prevalence pulls that head back
-    # toward the base rate, so adaptation degrades a well-calibrated model and
-    # "no adaptation" wins. None = unweighted (the old behaviour).
+    # Positive-class weight for the task BCE. The population head was fitted with a
+    # class-weighted loss; training here without one on a centre's ~2 % prevalence
+    # pulls predictions back towards the base rate. None = unweighted.
     pos_weight: float | None = None
-    # Whether adaptation trains the classifier head as well as the adapter.
-    # False (default) is the architecture the TD specifies: the population model
-    # (backbone + its WP3-fitted head) is frozen and the ADAPTERS carry the
-    # adaptation. Retraining a head that was fitted on 20,000 class-balanced
-    # reserve windows using ~16,000 windows of one centre's 2 %-prevalence data
-    # can only degrade it, which is why adapted methods scored BELOW the frozen
-    # population model. Keeping it frozen also restores adapter-only transfer,
-    # so the communication-efficiency figure reflects what actually travels.
+    # Also train the classifier head? False (default): the head stays frozen and
+    # only the patient adapter learns.
     train_head: bool = False
 
 
@@ -67,13 +56,12 @@ def _build_patient_classifier(
     clf = copy.deepcopy(population_clf)
     attach_ffn_adapter(clf.backbone, bottleneck=cohort_bottleneck, attr="cohort_adapter")
     load_level_state_dict(clf, cohort_state, attr="cohort_adapter")
-    # freeze cohort adapter (only patient adapter trains)
+    # Freeze the cohort adapter; only the patient adapter trains.
     for p in clf.backbone.cohort_adapter.parameters():
         p.requires_grad_(False)
-    # attach patient adapter (re-freezes everything but patient adapter)
+    # Attach the patient adapter (this freezes everything else).
     attach_ffn_adapter(clf.backbone, bottleneck=patient_bottleneck, attr="patient_adapter")
-    # The head trains only when the level is configured to train it; by default
-    # the WP3-fitted head is frozen and the patient ADAPTER does the adapting.
+    # The head trains only if this level is set to train it.
     for p in clf.classifier.parameters():
         p.requires_grad_(train_head)
     return clf
@@ -91,11 +79,11 @@ def train_patient_adapter(
 ) -> tuple[TFNDownstreamClassifier, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """Train a patient adapter on top of the given cohort state.
 
-    Returns ``(personalised_clf, patient_state, patient_delta)``.
-    ``patient_delta = patient_state - initial_patient_state``; since identity
-    initialisation is zero (up.weight=0), ``patient_delta`` equals
-    ``patient_state`` after training -- but we compute the difference
-    explicitly so the API stays correct if init changes.
+    Returns ``(personalised_clf, patient_state, patient_delta, avg_loss)``.
+    ``patient_delta`` is ``patient_state`` minus the initial state. The adapter
+    starts at zero, so the two are equal today, but the difference is computed
+    explicitly in case the initialisation changes. ``avg_loss`` is the mean task
+    BCE, used for uncertainty weighting.
     """
     clf = _build_patient_classifier(
         population_clf, cohort_state,
@@ -112,8 +100,8 @@ def train_patient_adapter(
     trainable = [p for p in clf.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
-    # Continual-learning hooks. Patient-level teacher (for distill) is the
-    # cohort-only model: population + cohort adapter without patient adapter.
+    # Continual-learning teacher for the patient level: the cohort model (population
+    # + cohort adapter, no patient adapter).
     teacher = None
     use_distill = cfg.cl_strategy == "distill"
     use_ewc = cfg.cl_strategy == "ewc"
@@ -128,7 +116,7 @@ def train_patient_adapter(
             p.requires_grad_(False)
     T = cfg.cl_temperature
 
-    # EWC: snapshot the patient-adapter init (zero) and a small Fisher.
+    # EWC: snapshot the patient adapter's starting state (zero) and a small Fisher.
     ewc_theta_star: dict[str, torch.Tensor] | None = None
     ewc_fisher: dict[str, torch.Tensor] | None = None
     if use_ewc:
@@ -141,11 +129,8 @@ def train_patient_adapter(
 
     clf.train()
     it = iter(train_loader)
-    # Mean BCE over this patient's steps. Returned so the coordinator can drive
-    # ``weighting_scheme="uncertainty"`` (inverse-loss weights) with a real
-    # signal — it previously passed a hardcoded 1.0 for every patient, which
-    # made inverse-loss weights uniform and silently turned "uncertainty" into
-    # "uniform" under a different name.
+    # Mean task BCE over this patient's steps, returned for uncertainty weighting
+    # (which uses 1 / loss).
     bce_sum, bce_steps = 0.0, 0
     for step in range(cfg.n_iters):
         try:
@@ -163,9 +148,8 @@ def train_patient_adapter(
             static_categorical=cat, static_numerical=num,
         ).view(-1)
         loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=_pw)
-        # Track the TASK loss only — CL penalties (KD/EWC/replay) are added
-        # below and are a property of the regulariser, not of how well this
-        # patient is fit, which is what uncertainty weighting is asking about.
+        # Count the task loss only. The CL penalties are added below and say nothing
+        # about how well this patient is fitted.
         bce_sum += float(loss.detach())
         bce_steps += 1
         if teacher is not None:
@@ -202,9 +186,8 @@ def train_patient_adapter(
 
     final = level_state_dict(clf, attr="patient_adapter", include_head=cfg.train_head)
     delta = {k: final[k] - initial[k] for k in final}
-    # 4th element: mean task BCE. Callers that only want the adapter can keep
-    # unpacking three values via ``*_``; the coordinator needs this for
-    # uncertainty weighting.
+    # Fourth return value: mean task BCE. Callers that only want the adapter can
+    # ignore it with ``*_``.
     avg_loss = bce_sum / max(bce_steps, 1)
     return clf, final, delta, avg_loss
 
@@ -213,9 +196,9 @@ def aggregate_patient_deltas(
     deltas: list[dict[str, torch.Tensor]],
     weights: list[float],
 ) -> dict[str, torch.Tensor]:
-    """Weighted average of patient adapter deltas — used for upward propagation
-    (patient -> cohort). Caller decides the weighting scheme (e.g., by sample
-    count, uncertainty, or recency).
+    """Weighted average of patient adapter deltas, for the patient-to-cohort step.
+
+    The caller chooses the weights (e.g. by sample count, uncertainty or recency).
     """
     if not deltas:
         raise ValueError("no deltas to aggregate")

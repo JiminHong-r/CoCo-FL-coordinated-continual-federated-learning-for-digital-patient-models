@@ -1,20 +1,16 @@
-"""Fit a classification head on top of a frozen TFNFullModel and report AUROC.
+"""Fit a classification head on a frozen TFNFullModel and report AUROC.
 
-Enriches each batch with static features (cat, num) looked up by patient_id from
-static_data.pickle, and elapsed_times set to ones (no temporal info available
-at the downstream inference dataset level).
+Each batch gets the patient's static features (looked up by patient id in
+static_data.pickle) and each window's real inter-event times, rebuilt by the collate
+from the dataset.
 
-Two probes are available via ``probe=``:
+Two probes, chosen with ``probe=``:
 
-``balanced`` (default)
-    Cached-feature, class-weighted logistic head — see :mod:`.probe`. Use this
-    for the reported population baselines: the tasks are imbalanced (mortality
-    sits near 2 % positives) and this path keeps every positive, weights the
-    minority class up, and selects on validation AUROC.
-``head``
-    The original SGD-trained MLP head, kept for comparison. It is now also
-    imbalance-aware (``pos_weight`` in the BCE, class-stratified sampling,
-    batched, selection on validation AUROC) rather than on validation loss.
+``balanced`` (default) Cached features and a class-weighted logistic head (see
+:mod:`.probe`). Used for the reported population baselines: it keeps every positive,
+weights the rare class up and selects on validation AUROC, which matters at ~2 %
+positives. ``head`` The original SGD-trained MLP head, kept for comparison. It also
+uses ``pos_weight``, class-stratified sampling and selection on validation AUROC.
 """
 import copy
 import json
@@ -48,9 +44,9 @@ from .probe import (
 def label_from_batch(label_dicts, pos_tokens, horizon_us=None):
     """Binary labels for a batch.
 
-    When ``horizon_us`` is set the outcome token must ALSO fall within that many
-    microseconds of the prediction point — a qualifying event later than the
-    horizon is a negative (e.g. readmission at 40 days under a 30-day horizon).
+    With ``horizon_us`` set, the outcome token must also fall within that many
+    microseconds of the prediction point; a later event counts as negative (e.g.
+    readmission at 40 days under a 30-day horizon).
     """
     expected = label_dicts["expected"]
     if horizon_us is None:
@@ -69,12 +65,11 @@ def label_from_batch(label_dicts, pos_tokens, horizon_us=None):
 
 @torch.no_grad()
 def val_auroc(classifier, loader, device, pos_tokens, max_iters=None, horizon_us=None):
-    """Validation AUROC — the selection metric for the SGD head.
+    """Validation AUROC, the selection metric for the SGD head.
 
-    Selecting on validation *loss* is what made this path degenerate on the
-    imbalanced tasks: unweighted BCE is minimised by predicting the base rate,
-    so the kept checkpoint was the one closest to a constant predictor. AUROC
-    is invariant to that, and is what actually gets reported.
+    Selecting on validation loss picks a near-constant predictor on imbalanced
+    tasks, because unweighted BCE is lowest when predicting the base rate. AUROC
+    does not reward that, and it is the metric that gets reported.
     """
     classifier.eval()
     preds, labels = [], []
@@ -98,12 +93,11 @@ def val_auroc(classifier, loader, device, pos_tokens, max_iters=None, horizon_us
 def train_head(classifier, train_loader, val_loader, device, pos_tokens,
                max_iters, lr=1e-3, eval_every=100, patience=3, val_iters=200,
                horizon_us=None, pos_weight=None):
-    """Fit the MLP head with a class-weighted BCE, selecting on validation AUROC.
+    """Fit the MLP head with class-weighted BCE, selecting on validation AUROC.
 
-    ``pos_weight`` multiplies the loss of the positive class, which is the
-    "higher penalty on the rare class" correction: at a 2 % base rate the
-    positives otherwise contribute ~2 % of the gradient and the head collapses
-    onto the majority class.
+    ``pos_weight`` increases the loss on positives. At a 2 % base rate they would
+    otherwise contribute ~2 % of the gradient and the head would just predict the
+    majority class.
     """
     for p in classifier.backbone.parameters():
         p.requires_grad = False
@@ -163,9 +157,9 @@ def main(cfg: DictConfig):
     probe_kind = str(getattr(cfg, "probe", "balanced")).lower()
     if probe_kind not in ("balanced", "head"):
         raise ValueError(f"probe must be 'balanced' or 'head', got {probe_kind!r}")
-    # The balanced probe caches features instead of re-running the backbone each
-    # epoch, so it can afford far more training windows than the SGD path — and
-    # it needs them: keeping every positive of a 2 %-prevalence task is the point.
+    # The balanced probe caches features instead of re-running the backbone every
+    # epoch, so it can use many more training windows, which it needs to keep every
+    # positive of a 2 % task.
     default_n_train = 20000 if probe_kind == "balanced" else 3000
     n_train = int(getattr(cfg, "n_train_samples", default_n_train))
     n_eval = int(getattr(cfg, "n_eval_samples", 3000))
@@ -174,8 +168,8 @@ def main(cfg: DictConfig):
     eval_every = int(getattr(cfg, "eval_every", 100))
     patience = int(getattr(cfg, "patience", 3))
     batch_size = int(getattr(cfg, "batch_size", 16))
-    # When set, also fit and persist the TORCH classifier head per task so
-    # WP4/WP5 can start from the real population model instead of a random head.
+    # If set, also fit and save the torch classifier head per task, so WP4/WP5 start
+    # from the real population model rather than a random head.
     head_dir = getattr(cfg, "save_head_dir", None)
     seed = int(getattr(cfg, "seed", 42))
 
@@ -195,7 +189,7 @@ def main(cfg: DictConfig):
     backbone.to(device)
     Vocabulary.from_path(test_dir)  # validate vocab compatibility
 
-    # Load static features for collate
+    # Static features for the collate
     with open(test_dir / STATIC_DATA_FN, "rb") as f:
         test_static = pickle.load(f)
     test_cat, test_num = build_static_arrays(test_static)
@@ -206,11 +200,11 @@ def main(cfg: DictConfig):
     else:
         train_cat, train_num = test_cat, test_num
 
-    # Built per task inside the loop below, once the datasets exist — they are
-    # needed to reconstruct each window's real Δt.
+    # The collates are built per task in the loop below, once the datasets exist,
+    # because they need the dataset to rebuild each window's real time gaps.
 
-    # Optional task filter: ``tasks`` may be a comma-separated string or list of
-    # task names to run a subset (e.g. just "hospital_mortality"). Default: all.
+    # Optional task filter: a comma-separated string or a list of task names.
+    # Default: all tasks.
     task_filter = getattr(cfg, "tasks", None)
     if task_filter:
         if isinstance(task_filter, str):
@@ -239,28 +233,24 @@ def main(cfg: DictConfig):
                                      dataset=train_base if train_base is not None else test_base)
         test_collate = make_collate(test_cat, test_num, dataset=test_base)
 
-        # WP3: restrict head-training to an explicit patient list (e.g. the 40%
-        # population reserve) so the probe is never fit on global-test patients
-        # when train_dir == input_dir (single-cohort split).
+        # WP3: train the head only on a given patient list (e.g. the 40 % reserve),
+        # so it never sees global-test patients when train_dir == input_dir.
         train_idx = list(range(len(train_base))) if train_base is not None else None
         train_restrict_path = getattr(cfg, "train_restrict_path", None)
         if train_base is not None and train_restrict_path:
             train_idx = filter_by_patients(train_base, train_restrict_path)
             print(f"  train_restrict: kept {len(train_idx)}/{len(train_base)} samples")
 
-        # WP2 task 2: restrict test eval to the 10% global held-out test set.
+        # WP2 task 2: evaluate only on the 10 % global held-out test set.
         test_idx = list(range(len(test_base)))
         global_test_path = getattr(cfg, "global_test_path", None)
         if global_test_path:
             test_idx = filter_by_patients(test_base, global_test_path)
             print(f"  global_test filter: kept {len(test_idx)}/{len(test_base)} samples")
 
-        # n_eval <= 0 means "use the FULL test set" (no subsampling). Capping the
-        # eval set starves low-prevalence tasks: at ~2% prevalence a 3,000-sample
-        # cap leaves only ~50 positives, so mortality AUROC swings between runs
-        # purely from the draw. Scoring all global-test patients restores enough
-        # positives (~650) to make the metric stable. Test data should never be
-        # subsampled for evaluation anyway.
+        # n_eval <= 0 means use the whole test set. A cap starves rare tasks: at ~2
+        # % prevalence 3,000 windows hold only ~50 positives and mortality AUROC
+        # jumps between runs. The full global test set has about 650.
         if 0 < n_eval < len(test_idx):
             test_idx = sorted(rng.choice(test_idx, size=n_eval, replace=False).tolist())
         print(f"  eval on {len(test_idx):,} test windows "
@@ -296,13 +286,11 @@ def main(cfg: DictConfig):
 
 
 def filter_by_patients(dataset, patient_list_path) -> list[int]:
-    """Sample indices of ``dataset`` whose prediction point belongs to a listed patient.
+    """Indices of samples in ``dataset`` whose prediction point belongs to a listed patient.
 
-    ``start_indices[i]`` is the TOKEN index sample ``i`` ends on, which is what
-    ``patient_id_at_idx`` must be keyed by. Every task dataset used here exposes
-    it; a dataset that does not is a bug rather than something to fall back on,
-    because indexing ``patient_id_at_idx`` with the sample index instead
-    silently produces an unrelated patient and a meaningless filter.
+    ``start_indices[i]`` is the token index sample ``i`` ends on, which is what
+    ``patient_id_at_idx`` is keyed by. A dataset without it is a bug: indexing by
+    sample number would silently look up the wrong patient.
     """
     if not hasattr(dataset, "start_indices"):
         raise AttributeError(
@@ -311,8 +299,8 @@ def filter_by_patients(dataset, patient_list_path) -> list[int]:
         )
     pids = {int(p) for p in json.loads(Path(patient_list_path).read_text())["patient_ids"]}
     starts = torch.as_tensor(dataset.start_indices, dtype=torch.long)
-    # One lookup for all starts: on the sharded backend ``patient_id_at_idx`` is
-    # a property that rebuilds a lazy accessor on every attribute access.
+    # Look up all starts at once: on the sharded backend ``patient_id_at_idx``
+    # rebuilds a lazy accessor on every access.
     at_start = dataset.patient_id_at_idx[starts]
     return [i for i, p in enumerate(at_start.reshape(-1).tolist()) if int(p) in pids]
 
@@ -343,8 +331,8 @@ def run_balanced_probe(backbone, train_base, train_idx, test_base, test_idx,
 
     X = extract_features(backbone, train_base, sel, train_collate, device,
                          batch_size=batch_size, desc="train features")
-    # Stratify the val split too, so C is not selected against a split that
-    # happens to hold no positives. Needs >= 2 of each class to be possible.
+    # Stratify the validation split too, so C is not chosen on a split with no
+    # positives. This needs at least 2 of each class.
     stratify = y_sel if np.bincount(y_sel, minlength=2).min() >= 2 else None
     X_tr, X_va, y_tr, y_va = train_test_split(
         X, y_sel, test_size=val_frac, random_state=seed, stratify=stratify,
@@ -363,16 +351,13 @@ def run_balanced_probe(backbone, train_base, train_idx, test_base, test_idx,
                 "n_train": len(y_tr), "n_train_pos": int(y_tr.sum())})
 
     if save_head_path is not None:
-        # Also fit the TORCH head that TFNDownstreamClassifier uses, so WP4/WP5
-        # can start from the actual population model. Without this they build
-        # TFNDownstreamClassifier(backbone) with a RANDOMLY INITIALISED head —
-        # the checkpoint holds only the backbone and its lm_head — which makes
-        # `population_only` a chance-level baseline and Δ_cohort meaningless.
-        # Last-token pooling only: that is what the classifier's forward feeds.
+        # Also fit the torch head that TFNDownstreamClassifier uses, so WP4/WP5
+        # start from the real population model. The checkpoint holds only the
+        # backbone, so without this the head would be random and population_only
+        # would score at chance. The classifier uses last-token pooling only.
         n_embd = int(backbone.n_embd)
-        # No second extraction pass: "last_mean" pooling is concat(last, mean),
-        # so the last-token features the classifier head consumes are already
-        # the leading n_embd columns of what we cached.
+        # No second pass needed: "last_mean" pooling is concat(last, mean), so the
+        # last-token features are the first n_embd columns of what is cached.
         assert X.shape[1] == 2 * n_embd, (
             f"expected concat(last, mean) features of width {2 * n_embd}, got {X.shape[1]}"
         )
@@ -397,7 +382,7 @@ def run_balanced_probe(backbone, train_base, train_idx, test_base, test_idx,
 
 
 def _score_torch_head(head_state, X, y, hidden, device):
-    """Test AUROC of a saved head — so WP4's population baseline is verifiable."""
+    """Test AUROC of a saved head, so WP4's population baseline can be checked."""
     import torch.nn as nn
 
     if len(np.unique(y)) < 2:
@@ -419,7 +404,7 @@ def run_sgd_head(backbone, train_base, train_idx, test_base, test_idx,
                  train_collate, test_collate, pos_tokens, horizon_us,
                  device, n_train, val_frac, batch_size, max_iters, eval_every,
                  patience, rng):
-    """Original SGD-trained MLP head, with the imbalance corrections applied."""
+    """The original SGD-trained MLP head, with the class-imbalance fixes."""
     classifier = TFNDownstreamClassifier(backbone, num_classes=1).to(device)
     es_info = {}
 
@@ -428,8 +413,8 @@ def run_sgd_head(backbone, train_base, train_idx, test_base, test_idx,
         sel = stratified_subsample(y_train_all, train_idx, n_train, rng)
         y_sel = y_train_all[np.asarray(sel, dtype=np.int64)]
         n_pos = int(y_sel.sum())
-        # Higher penalty on the rare class: without it the positives contribute
-        # their base-rate share of the gradient and the head learns the prior.
+        # Heavier loss on the rare class; without it the head just learns the base
+        # rate.
         pos_weight = (len(y_sel) - n_pos) / max(n_pos, 1)
         print(f"  stratified draw: {len(sel):,} windows, {n_pos:,} positive "
               f"({y_sel.mean():.3%}), pos_weight={pos_weight:.1f}")

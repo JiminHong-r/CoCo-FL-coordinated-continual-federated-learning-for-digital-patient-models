@@ -4,7 +4,7 @@ WORKDIR /coco-fl
 ENV TZ=America/New_York
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Add the deadsnakes repository to get python 3.11
+# Add the deadsnakes repository to get Python 3.12
 RUN apt update && apt install -y \
         software-properties-common && \
         add-apt-repository ppa:deadsnakes/ppa && \

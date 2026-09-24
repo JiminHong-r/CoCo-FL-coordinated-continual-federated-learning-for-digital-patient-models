@@ -1,18 +1,14 @@
-"""Flower's FedAvg and the single-process FedAvg must produce the same model.
+"""Flower's FedAvg and the in-process FedAvg must give the same model.
 
-The claim being defended is "moving to a real federated runtime does not change
-any reported number". That claim is cheap to assert and easy to get wrong, so it
-is checked numerically here rather than argued in prose.
+Moving to a real federated runtime must not change any reported number. Two things
+could break that:
 
-Two things can break it:
-
-1. **Different aggregation.** Flower computes ``sum(n_i * w_i) / sum(n_i)``;
-   ``fedavg_states`` computes ``sum((n_i / sum n_j) * w_i)``. Algebraically equal,
-   but only if both weight by the SAME per-client sample count.
-2. **Different ordering.** Flower exchanges an ordered list of arrays with the
-   names stripped. If client and server disagree on the order, tensors are
-   averaged against the wrong counterparts — and nothing raises, the numbers are
-   simply wrong. This is the more dangerous failure of the two.
+1. Different aggregation. Flower computes ``sum(n_i * w_i) / sum(n_i)`` and
+``weighted_state_average`` computes ``sum((n_i / sum n_j) * w_i)``. These are equal
+only if both use the same per-client sample counts. 2. Different ordering. Flower
+sends an ordered list of arrays without names. If client and server disagree on the
+order, the wrong tensors are averaged and nothing raises. This is the more dangerous
+of the two.
 """
 from __future__ import annotations
 
@@ -37,7 +33,7 @@ def _state(seed: int) -> dict[str, torch.Tensor]:
     }
 
 
-# --- ordering round-trip: the silent-corruption failure --------------------
+# Ordering round trip (the silent-corruption case)
 
 def test_state_survives_a_round_trip_through_the_wire_format():
     s = _state(0)
@@ -68,7 +64,7 @@ def test_wrong_array_count_raises():
         ndarrays_to_state(state_to_ndarrays(s)[:-1], s)
 
 
-# --- the equivalence that matters ------------------------------------------
+# The equivalence that matters
 
 @pytest.mark.parametrize("counts", [
     [100, 100, 100],          # equal sizes
@@ -93,27 +89,24 @@ def test_flower_fedavg_equals_single_process_fedavg(counts):
 
 
 def test_hierarchical_propagation_is_NOT_fedavg_and_needs_a_custom_strategy():
-    """The hierarchy's upward step is an EMA blend, not a weighted average, so
-    Flower's built-in FedAvg does not express it. Recording this as a test keeps
-    the distinction from being lost: `standard_fedavg` maps onto the stock
-    strategy, `hierarchical` requires a custom `Strategy` subclass."""
+    """The hierarchy's upward step is a blend, not a weighted average, so it needs a custom Flower strategy; standard_fedavg uses the stock one."""
     from cocofl.hierarchical.upward_prop import (
         propagate_patients_to_cohort, weighted_state_average,
     )
 
-    # Keys are namespaced: a cohort key maps to the patient namespace by suffix,
-    # so `cohort_adapter.down.weight` is updated from `patient_adapter.down.weight`.
-    # Using bare keys silently matches nothing and returns the cohort unchanged.
+    # Keys are namespaced: cohort_adapter.down.weight is updated from
+    # patient_adapter.down.weight by suffix. Bare keys would match nothing and leave
+    # the cohort unchanged.
     cohort = {"cohort_adapter.down.weight": torch.zeros(4, 8)}
     delta = {"patient_adapter.down.weight": torch.ones(4, 8)}
     blended = propagate_patients_to_cohort(cohort, [delta], [1], eta_cohort=0.3)
 
-    # EMA blend: new = cohort + eta * delta = 0 + 0.3 * 1
+    # Blend: new = cohort + eta * delta = 0 + 0.3 * 1
     assert torch.allclose(blended["cohort_adapter.down.weight"],
                           torch.full((4, 8), 0.3), atol=1e-6)
 
-    # A weighted average of the same two would give 0.5, not 0.3 — so the
-    # upward step is not expressible by the stock FedAvg strategy.
+    # A weighted average of the same two gives 0.5, not 0.3, so stock FedAvg cannot
+    # express the step.
     plain = weighted_state_average(
         [{"x": torch.zeros(4, 8)}, {"x": torch.ones(4, 8)}], [1.0, 1.0])
     assert torch.allclose(plain["x"], torch.full((4, 8), 0.5), atol=1e-6)
@@ -124,7 +117,7 @@ def test_hierarchical_propagation_is_NOT_fedavg_and_needs_a_custom_strategy():
 
 
 def test_equivalence_holds_for_a_single_client():
-    """One client must be a no-op average, not a divide-by-something-else."""
+    """With one client the average must return that client's state unchanged."""
     s = _state(7)
     ours = weighted_state_average([s], [42.0])
     theirs = ndarrays_to_state(aggregate([(state_to_ndarrays(s), 42)]), s)
@@ -134,7 +127,7 @@ def test_equivalence_holds_for_a_single_client():
 
 
 def test_weighting_actually_depends_on_the_counts():
-    """Guards the test above: if both ignored counts they would agree trivially."""
+    """Guard for the tests above: if both ignored the counts they would agree trivially."""
     a, b = _state(1), _state(2)
     even = weighted_state_average([a, b], [1.0, 1.0])
     skew = weighted_state_average([a, b], [1.0, 99.0])
@@ -143,13 +136,10 @@ def test_weighting_actually_depends_on_the_counts():
     )
 
 
-# --- the custom strategy for the hierarchy ---------------------------------
+# The custom strategy for the hierarchy
 
 def test_custom_strategy_actually_blends_and_does_not_silently_no_op():
-    """The failure this guards against is specific and has already happened
-    twice while writing this file: `propagate_*` functions match keys by
-    namespace, and given the wrong namespace they return the input UNCHANGED
-    without raising. A strategy that no-ops looks like a strategy that works."""
+    """The strategy must really blend. The propagate_* functions match keys by namespace and return the input unchanged, without error, when given the wrong namespace."""
     from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
     from cocofl.federated.flower_app import (
@@ -170,7 +160,7 @@ def test_custom_strategy_actually_blends_and_does_not_silently_no_op():
     params, _ = strat.aggregate_fit(1, [(None, _Res(client_state, 100))], [])
     out = ndarrays_to_state(parameters_to_ndarrays(params), ref)
 
-    # EMA: (1-0.1)*0 + 0.1*1 = 0.1
+    # Blend: (1 - 0.1) * 0 + 0.1 * 1 = 0.1
     got = out["cohort_adapter.down.weight"]
     assert torch.allclose(got, torch.full((4, 8), 0.1), atol=1e-6), got[0, 0]
     assert not torch.allclose(got, torch.zeros(4, 8)), (
@@ -179,7 +169,7 @@ def test_custom_strategy_actually_blends_and_does_not_silently_no_op():
 
 
 def test_custom_strategy_differs_from_stock_fedavg():
-    """If it matched stock FedAvg there would be no reason to subclass."""
+    """If it matched stock FedAvg there would be no reason to subclass it."""
     from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
 
     from cocofl.federated.flower_app import (
@@ -209,20 +199,18 @@ def test_custom_strategy_differs_from_stock_fedavg():
     )
 
 
-# --- standard_fedavg through Flower must equal the in-process aggregator ------
+# standard_fedavg through Flower must equal the in-process aggregator
 
 @pytest.mark.parametrize("counts", [(100, 100, 100), (2855, 134086, 27141), (1, 1, 500)])
 def test_flower_fedavg_round_matches_weighted_state_average(counts):
-    """`standard_fedavg` is compared directly against `hierarchical` in the
-    results table, so both must come from the same runtime. This pins that
-    routing it through Flower does not move the number."""
+    """standard_fedavg is compared directly with hierarchical, so routing it through Flower must not change its number."""
     from cocofl.federated.flower_app import flower_fedavg_round
     from cocofl.hierarchical.upward_prop import weighted_state_average
 
     server = _state(0)
     locals_ = [_state(1), _state(2), _state(3)]
 
-    # Flower path: each "client" returns its prepared state and sample count.
+    # Flower path: each client returns its prepared state and sample count.
     train_fns = {
         hid: (lambda st, i=hid: (locals_[i], counts[i])) for hid in range(3)
     }
@@ -238,8 +226,7 @@ def test_flower_fedavg_round_matches_weighted_state_average(counts):
 
 
 def test_flower_fedavg_round_actually_weights_by_count():
-    """A guard: if both aggregators ignored the counts this would still pass
-    above, so check the weighting is load-bearing."""
+    """Guard: check that the counts really change the result, or the test above could pass trivially."""
     from cocofl.federated.flower_app import flower_fedavg_round
 
     server = _state(0)
@@ -254,9 +241,7 @@ def test_flower_fedavg_round_actually_weights_by_count():
 
 
 def test_round_trip_preserves_device_not_just_dtype():
-    """The wire format is CPU numpy, so a naive rebuild silently moves state to
-    CPU and the mismatch only surfaces later, against a live cuda tensor. Pin
-    placement here, where the cause is visible."""
+    """The wire format is CPU numpy; rebuilding must restore the original device, not only the dtype, or the error appears later, far from its cause."""
     ref = _state(7)
     got = ndarrays_to_state(state_to_ndarrays(ref), ref)
     for k in ref:

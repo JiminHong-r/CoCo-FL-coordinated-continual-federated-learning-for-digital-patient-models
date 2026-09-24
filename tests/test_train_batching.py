@@ -1,18 +1,12 @@
-"""Cohort-training batches must be length-homogeneous, shuffled, and complete.
+"""Cohort-training batches must be same-length, shuffled and complete.
 
-Training could only ever run at batch 1: downstream windows are variable-length,
-so ``make_collate``'s ``torch.stack`` fails above that. With the whole 50%
-federated pool now actually reachable, 15 single-window steps per round is
-~0.03% of a centre's partition, so batching is what makes "train on the full
-partition" affordable.
+Windows have different lengths, so plain batching fails above batch 1, and at batch
+1 a round covers a tiny part of a centre's data. Two properties make batching safe:
 
-Two properties carry the correctness:
-  * every batch shares one exact sequence length (nothing is padded into the
-    T-LSTM recurrence, which starts from a zero state and would be perturbed
-    by a pad prefix);
-  * the order changes between passes, because ``local_steps_per_epoch``
-    truncates the loader and a deterministic order would hand every round the
-    same prefix.
+* every batch has one exact sequence length, so nothing is padded into the T-LSTM
+(which would run through the padding); * the order changes between passes, because
+``local_steps_per_epoch`` stops the loader early and a fixed order would give every
+round the same first batches.
 """
 from __future__ import annotations
 
@@ -49,7 +43,7 @@ def test_len_matches_the_batches_produced():
 
 
 def test_order_changes_between_passes():
-    """A deterministic order + local_steps_per_epoch would train one prefix forever."""
+    """A fixed order with local_steps_per_epoch would train on the same first batches forever."""
     sampler = ShuffledLengthBucketBatchSampler(
         _lengths(FakeInferenceDataset()), batch_size=1, seed=0,
     )
@@ -76,8 +70,8 @@ def test_batched_loader_stacks_without_padding():
     total = 0
     for batch in loader:
         (x, _e, _c, _n), _y = batch
-        # A stacked batch is only well-formed because lengths are homogeneous;
-        # every row must be a real window, never a padded one.
+        # Stacking only works because lengths match; every row must be a real
+        # window, never a padded one.
         assert x.shape[1] >= CONTEXT_SIZE
         total += x.shape[0]
     assert total == len(ds)

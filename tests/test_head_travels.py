@@ -1,13 +1,8 @@
-"""Whatever a level trains must be what that level persists and is scored with.
+"""Whatever a level trains must be what it saves and is scored with.
 
-Cohort and patient training explicitly unfreeze ``classifier.classifier``
-("Make sure classifier head is also trainable for downstream"), so the head is
-part of what those levels learn. But the state that survived a round was
-adapter-only, and evaluation rebuilt the model from the *population* classifier
-— so the adapter was scored against a head it had never been co-adapted with,
-every round. FedAvg was unaffected: ``federated_state_dict(include_head=True)``
-already carried its head, which made the headline "FedAvg beats the hierarchy"
-comparison unfair rather than merely unfavourable.
+When a level trains the classifier head, the saved state must include the head.
+Otherwise the adapter is later scored against the population's head, which it was
+not trained with, while FedAvg (which kept its head) would be scored fairly.
 """
 from __future__ import annotations
 
@@ -28,7 +23,7 @@ class _Backbone(nn.Module):
 
 
 class _Clf(nn.Module):
-    """Minimal stand-in for TFNDownstreamClassifier's (backbone, classifier) shape."""
+    """Minimal stand-in with TFNDownstreamClassifier's (backbone, classifier) shape."""
 
     def __init__(self, hidden=8):
         super().__init__()
@@ -68,7 +63,7 @@ def test_head_round_trips_through_save_and_load():
 
 
 def test_adapter_only_state_still_loads():
-    """Backwards compatible: a head-less state must not raise."""
+    """A state without a head must still load."""
     src = _make()
     state = {k: v for k, v in level_state_dict(src, attr="cohort_adapter").items()
              if not k.startswith("classifier.")}
@@ -76,7 +71,7 @@ def test_adapter_only_state_still_loads():
 
 
 def test_head_deltas_propagate_upward():
-    """Head keys are namespace-free; the adapter-renaming branch would drop them."""
+    """Head keys have no adapter prefix; renaming them like adapter keys would drop them."""
     cohort = {
         "cohort_adapter.up.weight": torch.zeros(4, 2),
         "classifier.0.weight": torch.zeros(4, 8),

@@ -1,17 +1,17 @@
-"""HierarchicalCoordinator: orchestrates the bidirectional 3-level loop (Spec WP4 task 5).
+"""HierarchicalCoordinator: runs the three-level adaptation loop (WP4 task 5).
 
-Round structure (one "super-round"):
+One round:
 
-  1. For each cohort: train cohort adapter on its data (medium pace)
-  2. For each cohort: train patient adapters on top of cohort (fast pace)
-  3. Per cohort: aggregate patient deltas -> update cohort adapter (upward step 1)
-  4. Across cohorts: aggregate cohort states -> EMA-update population adapter (upward step 2)
-  5. Optional: re-seed cohort adapters from updated population (top-down refresh)
+    1. each centre trains its cohort adapter on its own data (medium pace)
+    2. each centre trains patient adapters on top of its cohort (fast pace)
+    3. each centre folds its patient updates into its cohort adapter (upward step 1)
+    4. the cohort states are blended into the population adapter (upward step 2)
+    5. cohorts are pulled part-way back towards the population (top-down refresh)
 
-The coordination protocol (Spec WP4 task 5) is controlled by:
-  - ``patients_per_round`` : how many patients per cohort to adapt per round
-  - ``population_update_freq``: do step 4 every N rounds (slow)
-  - ``divergence_threshold`` (optional): trigger sync when cohort drifts too far
+Step 4 runs only when a trigger fires: every ``population_update_freq`` rounds,
+after ``population_update_after_n_patients`` patient updates, or when a cohort
+drifts more than ``divergence_threshold`` from the population state. Step 5 is
+applied at the start of the following round.
 """
 from __future__ import annotations
 
@@ -38,65 +38,46 @@ class CoordinatorConfig:
     cohort_cfg: CohortConfig = field(default_factory=CohortConfig)
     patient_cfg: PatientConfig = field(default_factory=PatientConfig)
     patients_per_round: int = 5
-    # Spec WP4 task 5: trigger upward population update by either a fixed
-    # frequency (every N rounds) OR a divergence threshold (cohort drifted
-    # too far from the last broadcast). The first condition met wins.
+    # WP4 task 5 triggers for the population update: every N rounds, or when a
+    # cohort has drifted too far from the last population state. Whichever fires
+    # first wins.
     population_update_freq: int = 3
     divergence_threshold: float | None = None  # None = frequency-only triggering
-    # Spec WP4 task 5 asks for triggering "after N patient updates, OR based on
-    # divergence thresholds". ``population_update_freq`` counts ROUNDS, which is
-    # not the same condition: a round contains ``patients_per_round`` × centres
-    # patient updates, so a round-based trigger cannot express "after N patient
-    # updates" at all. This counts actual patient updates since the last sync.
-    # None = disabled (round frequency and/or divergence still apply).
+    # Trigger after N patient updates. This differs from the round trigger because
+    # one round already holds patients_per_round x centres patient updates. None
+    # turns it off.
     population_update_after_n_patients: int | None = None
     eta_cohort: float = 0.3
     eta_population: float = 0.1
     refresh_cohort_from_population: bool = True
-    # Top-down refresh strength (Spec WP4 task 1/5). When the population model is
-    # broadcast back down, each cohort is BLENDED toward it rather than
-    # overwritten, so centre-specific learning is preserved:
-    #   cohort <- (1 - refresh_blend) * cohort + refresh_blend * population
-    # refresh_blend=1.0 reproduces the old full-overwrite behaviour (which
-    # collapsed hier_cohort onto population); 0.0 disables top-down pull.
+    # Top-down refresh strength. Each cohort is blended towards the population
+    # instead of overwritten, so it keeps what it learned:
+    #     cohort <- (1 - refresh_blend) * cohort + refresh_blend * population
+    # 1.0 overwrites completely; 0.0 turns the refresh off.
     refresh_blend: float = 0.3
-    # Spec WP4 task 3 defines TWO upward mechanisms — patient->cohort and
-    # cohort->population — so the weighting scheme is selectable per level. One
-    # shared knob (the previous design) applies the same scheme to both and
-    # therefore cannot compare them, which is what the task asks for.
-    # ``weighting_scheme`` remains the default for both when the per-level knobs
-    # are left unset.
+    # Weighting for the two upward steps (WP4 task 3), settable per level so the two
+    # can differ. weighting_scheme is used wherever a per-level scheme is unset.
     weighting_scheme: str = "volume"
     patient_weighting_scheme: str | None = None    # patient -> cohort
     cohort_weighting_scheme: str | None = None     # cohort  -> population
-    # Half-life for time-based ``recency`` weighting, in days.
+    # Half-life, in days, for recency weighting.
     recency_half_life_days: float = 180.0
-    # Which patients each round draws on. False (default) takes the SAME first
-    # ``patients_per_round`` streams every round, so any patient beyond that
-    # prefix is built and never trained on, and upward propagation sees one
-    # fixed group repeatedly. True walks a rotating window through the whole
-    # stream list, so over R rounds up to ``R * patients_per_round`` distinct
-    # patients feed the cohort at identical per-round cost.
-    #
-    # This changes the method, not just its measurement precision — leave it off
-    # for runs meant to be compared against the v5 results.
+    # Which patients each round uses. False (default): the same first
+    # patients_per_round patients every round. True: a window that moves through the
+    # whole list, so more distinct patients contribute over the rounds at the same
+    # cost per round. This changes the method, so keep it off when comparing with
+    # the reported runs.
     patient_rotation: bool = False
-    # TD baseline distinction. Hierarchical (False): a patient adapter starts
-    # from its centre's cohort state, inheriting centre-level knowledge — the
-    # hierarchy's DOWNWARD flow. Local fine-tuning (True): the patient starts
-    # from the population model instead, so no hierarchy is used in either
-    # direction, which is what "per-centre and per-patient fine-tuning without
-    # coordination" means. Without this the two baselines are the same method:
-    # patients always initialise from the cohort state, so setting eta_cohort=0
-    # on the local baseline would make it identical to top_down_only.
+    # Where a patient adapter starts. False (hierarchical): from its centre's cohort
+    # state, which is the hierarchy's downward flow. True (local_finetune): from the
+    # population model, so no hierarchy is used, matching "per-centre and per-
+    # patient fine-tuning without coordination".
     patient_init_from_population: bool = False
-    # Route steps 1-3 through Flower clients and step 4 through a Flower
-    # strategy instead of the in-process loop. The arithmetic is identical
-    # (tests/test_flower_equivalence.py); what changes is EXECUTION ORDER, since
-    # a Flower client completes all of its own work inside fit() whereas the
-    # in-process path runs every centre's cohort step before any patient step.
-    # That reorders consumption of torch's global RNG, so cells agree within the
-    # documented tolerance rather than bit-exactly.
+    # Run steps 1-3 as Flower clients and step 4 as a Flower strategy. The maths is
+    # the same as the in-process loop (tests/test_flower_equivalence.py), but a
+    # Flower client does all its own work inside fit(), which changes the order of
+    # random draws. Results therefore agree within a small tolerance rather than
+    # exactly.
     use_flower: bool = False
 
 
@@ -119,7 +100,7 @@ class HierarchicalCoordinator:
         self.device = device
         self.cfg = cfg or CoordinatorConfig()
 
-        # Initialise per-cohort adapter states (start fresh per hospital)
+        # One fresh cohort adapter state per hospital.
         self.cohort_states: dict[int, dict[str, torch.Tensor]] = {}
         for hid in hospital_train_loaders:
             tmpl = copy.deepcopy(population_clf)
@@ -130,37 +111,34 @@ class HierarchicalCoordinator:
                 include_head=self.cfg.cohort_cfg.train_head,
                 head_bias_only=self.cfg.cohort_cfg.train_head_bias_only)
             del tmpl
-        # Pristine identity states, kept so a patient can be initialised from
-        # the population model rather than from its centre (see
-        # ``patient_init_from_population``). The FFN adapter is identity at
-        # initialisation, so this state IS the population model.
+        # Untouched starting states. The adapter is the identity at initialisation,
+        # so these equal the population model; used when patients start from the
+        # population (patient_init_from_population).
         self._initial_cohort_states = {
             hid: {k: v.clone() for k, v in st.items()}
             for hid, st in self.cohort_states.items()
         }
-        # Population adapter is None until propagated up for the first time
+        # No population adapter until the first upward step.
         self.population_adapter_state: dict[str, torch.Tensor] | None = None
         self.round_idx = 0
         self.history: list[dict] = []
-        # Patient updates applied since the last population sync — drives the
-        # "after N patient updates" trigger (Spec WP4 task 5).
+        # Patient updates since the last population sync, for the "after N patient
+        # updates" trigger.
         self.patients_since_sync = 0
-        # Set when a population sync happens; consumed at the START of the next
-        # round (see run_round) so evaluation never sees a refreshed state for the
-        # round that was just trained.
+        # Set when a population sync happens and used at the start of the next
+        # round, so the round just trained is evaluated before any refresh.
         self._refresh_pending = False
-        # Flower-path state: per-round log fragments and pre-patient snapshots the
-        # clients fill in, plus lazily built clients/strategy.
+        # State for the Flower path: log parts and pre-patient snapshots the clients
+        # fill in, plus the clients and strategy, built on first use.
         self._flower_logs: dict = {}
         self._flower_pre_patient: dict = {}
         self._flower_refresh_pending = False
         self._flower_clients = None
         self._flower_strategy = None
 
-        # Replay buffer for "replay" CL strategy: pre-populated from the
-        # cohort training loaders (proxy for population/historic data).
-        # One shared buffer across all hospitals so a cohort sees diverse
-        # samples — keeps the adapter from over-specialising to its silo.
+        # Replay buffer for the "replay" CL strategy, filled from the cohort
+        # training loaders. One buffer is shared by all hospitals so each cohort
+        # sees varied samples.
         self.replay_buffer = None
         needs_replay = (
             self.cfg.cohort_cfg.cl_strategy == "replay"
@@ -180,9 +158,8 @@ class HierarchicalCoordinator:
         """Top-down step: re-init cohorts using population state as starting point."""
         if self.population_adapter_state is None or not self.cfg.refresh_cohort_from_population:
             return
-        # Blend (do NOT overwrite) the population adapter into each cohort so the
-        # centre keeps the adaptation it just learned. Overwriting here is what
-        # collapsed hier_cohort onto the population baseline (delta_cohort ~= 0).
+        # Blend rather than overwrite, so each centre keeps what it just learned.
+        # Overwriting made the cohort models collapse back to the population model.
         beta = self.cfg.refresh_blend
         if beta <= 0.0:
             return
@@ -190,12 +167,11 @@ class HierarchicalCoordinator:
             self._refresh_one_cohort(hid, self.population_adapter_state, beta)
 
     def _refresh_one_cohort(self, hid, population_state, beta=None) -> None:
-        """Blend the population adapter into ONE centre's cohort state.
+        """Blend the population adapter into one centre's cohort state.
 
-        Split out from ``_refresh_cohort_from_population`` because under Flower
-        this is the client's job: the server broadcasts the population adapter and
-        each centre blends it into its own state on receipt. Same arithmetic,
-        performed where it would actually happen in a deployment.
+        Separate from ``_refresh_cohort_from_population`` because under Flower each
+        client does this itself when it receives the population adapter. Same maths,
+        done where it would happen in a real deployment.
         """
         if not population_state:
             return
@@ -214,11 +190,9 @@ class HierarchicalCoordinator:
     def _latest_time_in(loader) -> int | None:
         """Newest prediction time among a loader's windows, in microseconds.
 
-        This is what makes ``recency`` mean recency: the weight of a patient's
-        update decays with how old that patient's data is, rather than with where
-        the patient happened to sit in the within-round list. Returns None when
-        the dataset does not expose ``times``/``start_indices``, in which case
-        ``_weights_for`` warns and falls back.
+        Recency weighting uses this, so an update's weight depends on how old the
+        patient's data is. Returns None when the dataset has no ``times`` or
+        ``start_indices``; ``_weights_for`` then warns and falls back.
         """
         subset = getattr(loader, "dataset", None)
         ds = getattr(subset, "dataset", None)
@@ -237,11 +211,9 @@ class HierarchicalCoordinator:
     def _patients_this_round(self, patient_streams: list) -> list:
         """The patient streams to train on this round.
 
-        Without rotation this is the leading ``patients_per_round`` streams,
-        every round. With rotation the window advances by that many each round
-        and wraps, so round r starts at ``(r-1) * patients_per_round``. When the
-        window is at least as long as the stream list the two are equivalent —
-        every patient is used either way.
+        Without rotation: the first ``patients_per_round`` streams every round. With
+        rotation the window moves forward by that many each round and wraps around.
+        When the window covers the whole list the two are the same.
         """
         n_per_round = self.cfg.patients_per_round
         n = len(patient_streams)
@@ -251,33 +223,30 @@ class HierarchicalCoordinator:
         return [patient_streams[(start + k) % n] for k in range(n_per_round)]
 
     def _cohort_step(self, hid) -> dict:
-        """Cohort-level training for ONE centre (round step 1).
+        """Cohort training for one centre (step 1).
 
-        Extracted from ``run_round`` so the single-process path and the Flower
-        client execute the SAME code rather than two copies. Re-implementing a
-        per-centre step inside the client is exactly how the "two independent
-        copies drifted apart" defect arose once already, so the client calls this.
+        Kept as its own method so the in-process path and the Flower client run the
+        same code instead of two copies that could drift apart.
         """
         loader = self.hospital_train_loaders[hid]
         tmpl = copy.deepcopy(self.population_clf)
         attach_ffn_adapter(tmpl.backbone, bottleneck=self.cfg.cohort_cfg.bottleneck,
                            attr="cohort_adapter")
-        # Load current cohort state into the fresh template
+        # Load the current cohort state into a fresh copy.
         load_level_state_dict(tmpl, self.cohort_states[hid], attr="cohort_adapter")
-        # Train one local round on top of current state
+        # Train one local round on top of it.
         for p in tmpl.backbone.cohort_adapter.parameters():
             p.requires_grad_(True)
         for p in tmpl.classifier.parameters():
             p.requires_grad_(self.cfg.cohort_cfg.train_head)
         if (self.cfg.cohort_cfg.train_head_bias_only
                 and not self.cfg.cohort_cfg.train_head):
-            # Intercepts only — see CohortConfig.train_head_bias_only.
+            # Intercepts only (see CohortConfig.train_head_bias_only).
             from ..adapters.ffn import head_bias_parameters
             for _n, p in head_bias_parameters(tmpl):
                 p.requires_grad_(True)
-        # When ``cohort_cfg.cl_strategy == "distill"`` the frozen population
-        # classifier is the teacher, so the cohort adapter does not drift too far
-        # from population knowledge (Spec WP4 task 4).
+        # With cl_strategy == "distill" the frozen population model is the teacher,
+        # which keeps the cohort adapter close to population knowledge (WP4 task 4).
         from .cohort import _train_one_cohort_step
         teacher = self.population_clf if self.cfg.cohort_cfg.cl_strategy == "distill" else None
         n_seen, avg_loss = _train_one_cohort_step(
@@ -294,11 +263,11 @@ class HierarchicalCoordinator:
         return {f"cohort_{hid}_loss": avg_loss, f"cohort_{hid}_n_seen": n_seen}
 
     def _patient_step(self, hid, pre_state: dict) -> dict:
-        """Patient training + patient->cohort propagation for ONE centre (steps 2-3).
+        """Patient training and patient-to-cohort propagation for one centre (steps 2-3).
 
-        ``pre_state`` is this centre's cohort state as it stood after the cohort
-        step and before any patient feedback — the reference the delta norm is
-        measured against (Spec WP5 axis 4).
+        ``pre_state`` is the centre's cohort state after the cohort step and before
+        any patient feedback; the size of the patient update is measured against it
+        (WP5 axis 4).
         """
         patient_streams = self.hospital_patient_streams[hid]
         cohort_state = self.cohort_states[hid]
@@ -316,13 +285,13 @@ class HierarchicalCoordinator:
             )
             deltas.append(delta)
             counts.append(len(p_train_loader.dataset))
-            # Real per-patient task loss; ``uncertainty`` weighting takes 1/loss.
+            # Per-patient task loss; uncertainty weighting uses 1 / loss.
             losses.append(p_loss)
-            # Data recency for this patient (Spec WP4 task 3 "update recency").
+            # How recent this patient's data is (WP4 task 3, recency weighting).
             times.append(self._latest_time_in(p_train_loader))
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        # Newest data this centre contributed, for cohort->population recency.
+        # Newest data this centre contributed, for cohort-to-population recency.
         _cohort_times = [t for t in times if t is not None]
         log[f"cohort_{hid}_latest_time"] = (
             max(_cohort_times) if _cohort_times
@@ -340,7 +309,7 @@ class HierarchicalCoordinator:
             )
         self.patients_since_sync += len(deltas)
         log[f"cohort_{hid}_n_patients"] = len(deltas)
-        # L2 norm of the cohort delta from patient feedback.
+        # Size (L2 norm) of the change patient feedback made to the cohort.
         delta_norm = 0.0
         for k, v_new in self.cohort_states[hid].items():
             if k in pre_state:
@@ -349,37 +318,36 @@ class HierarchicalCoordinator:
         return log
 
     def run_round(self) -> dict:
-        """One super-round: cohort -> patients -> upward -> (maybe) population update."""
+        """One round: cohort, then patients, then upward steps, then maybe a population update."""
         self.round_idx += 1
         round_log = {"round": self.round_idx}
 
-        # Deferred top-down refresh from the previous round's population sync.
-        # Done HERE so it seeds this round's training rather than altering the
-        # previous round's already-reported state.
+        # Apply the refresh from the previous round's population sync here, so it
+        # seeds this round's training instead of changing the state already reported
+        # for the previous round.
         if getattr(self, "_refresh_pending", False):
             self._refresh_cohort_from_population()
             self._refresh_pending = False
             round_log["refreshed_from_population"] = True
 
-        # --- Steps 1-3: per-centre work, in-process or through Flower ---
+        # Steps 1-3: per-centre work, in-process or through Flower
         if self.cfg.use_flower:
             cohort_pre_patient = self._flower_centre_rounds(round_log)
             round_log["cohort_state_pre_patient"] = cohort_pre_patient
             return self._finish_round(round_log)
 
-        # --- Step 1: cohort-level training (per centre) ---
+        # Step 1: cohort training, per centre
         for hid in self.hospital_train_loaders:
             round_log.update(self._cohort_step(hid))
-        # Spec WP5 axis 4: record cohort-state SNAPSHOT before patient aggregation
-        # so the harness can attribute later cohort improvement to patient
-        # feedback (vs the cohort-only training step that came before).
+        # Snapshot each cohort before patient feedback, so later changes can be
+        # credited to patient feedback (WP5 axis 4).
         cohort_pre_patient = {
             hid: {k: v.clone() for k, v in cs.items()}
             for hid, cs in self.cohort_states.items()
         }
         round_log["cohort_state_pre_patient"] = cohort_pre_patient
 
-        # --- Step 2 + 3: patient training + upward propagation per cohort ---
+        # Steps 2-3: patient training and upward propagation, per centre
         for hid in self.hospital_patient_streams:
             round_log.update(self._patient_step(hid, cohort_pre_patient[hid]))
 
@@ -387,13 +355,12 @@ class HierarchicalCoordinator:
 
     # ------------------------------------------------------------------ Flower
     def _flower_centre_rounds(self, round_log: dict) -> dict:
-        """Steps 1-3 for every centre, executed as Flower clients.
+        """Steps 1-3 for every centre, run as Flower clients.
 
-        Each client completes its OWN cohort step and patient loop inside
-        ``fit()`` — which is what a real federated client does, and why execution
-        order differs from the in-process path. The clients call the very same
-        ``_cohort_step`` / ``_patient_step`` used above rather than reimplementing
-        them, so the two paths cannot drift apart.
+        Each client runs its own cohort step and patient loop inside ``fit()``, as a
+        real federated client would; this is why the order differs from the in-
+        process path. The clients call the same ``_cohort_step`` and
+        ``_patient_step`` as above.
         """
         from ..federated.flower_app import (
             make_hierarchical_client_class, state_to_ndarrays,
@@ -403,8 +370,8 @@ class HierarchicalCoordinator:
             self._flower_clients = {
                 hid: Client(self, hid) for hid in self.hospital_train_loaders
             }
-        # The server broadcasts the population adapter; each client blends it in
-        # on receipt when a refresh is pending (the hierarchy's downward flow).
+        # The server sends the population adapter; when a refresh is due, each
+        # client blends it in on arrival (the downward flow).
         pop = self.population_adapter_state or {}
         params = state_to_ndarrays(pop) if pop else []
         refresh = bool(getattr(self, "_flower_refresh_pending", False))
@@ -418,12 +385,11 @@ class HierarchicalCoordinator:
 
     def _flower_aggregate(self, cohort_states, cohort_counts,
                           cohort_losses, cohort_times):
-        """Step 4 through Flower's strategy rather than a direct call.
+        """Step 4 through a Flower strategy.
 
-        ``HierarchicalEMAStrategy`` subclasses ``flwr.server.strategy.FedAvg`` and
-        replaces its average with the cohort->population EMA blend, because stock
-        FedAvg cannot express it (with eta=0.3 onto a zero cohort it returns 0.5
-        where the blend returns 0.3). Verified in test_flower_equivalence.py.
+        ``HierarchicalEMAStrategy`` subclasses Flower's ``FedAvg`` and replaces the
+        plain average with the cohort-to-population blend, which stock FedAvg cannot
+        express. Checked in tests/test_flower_equivalence.py.
         """
         from ..federated.flower_app import (
             make_hierarchical_strategy, state_to_ndarrays, ndarrays_to_state,
@@ -445,12 +411,8 @@ class HierarchicalCoordinator:
                 {k: torch.zeros_like(v) for k, v in reference.items()}
             )
         strat = self._flower_strategy
-        # Say it out loud. Three separate "green" bring-up runs tonight executed
-        # less than they appeared to (a dropped flag, a stale file, and a trigger
-        # that never fired), each reporting CELL OK. The cohort->population step
-        # is the upward half of this project's central claim, so a run must state
-        # in its log that it happened and by which route — not leave it to be
-        # inferred from the absence of a crash.
+        # Log that the upward step ran and by which route, so a run's log shows it
+        # directly.
         print(f"    cohort->population via FLOWER strategy "
               f"(HierarchicalEMAStrategy, eta_population={self.cfg.eta_population}, "
               f"scheme={self.cfg.cohort_weighting_scheme or self.cfg.weighting_scheme}, "
@@ -471,9 +433,8 @@ class HierarchicalCoordinator:
 
     def _finish_round(self, round_log: dict) -> dict:
         """Step 4 onward — shared by the in-process and Flower paths."""
-        # --- Step 4: cohort -> population (slow) ---
-        # --- Step 4 trigger (Spec WP4 task 5): round frequency, OR "after N
-        # patient updates", OR divergence. The first condition met wins.
+        # Step 4: cohort -> population (slow). It fires on round frequency, after N
+        # patient updates, or on divergence; whichever comes first.
         freq_trigger = self.round_idx % self.cfg.population_update_freq == 0
         n_patient_trigger = False
         if self.cfg.population_update_after_n_patients is not None:
@@ -484,18 +445,11 @@ class HierarchicalCoordinator:
         diverge_trigger = False
         max_diverge = None
         if self.cfg.divergence_threshold is not None:
-            # L2 distance between each cohort state and the last broadcast
-            # population state. If any cohort exceeds the threshold the global
-            # has drifted enough — trigger an immediate population update.
-            #
-            # Before the first population update the population adapter is the
-            # ZERO state (an FFN adapter starts as an identity residual), not
-            # "missing". This used to also require
-            # ``population_adapter_state is not None``, which meant divergence
-            # could never fire until a FREQUENCY update had already happened —
-            # so at the default ``population_update_freq == max_rounds`` the
-            # divergence arm never fired at all and a divergence-configured run
-            # was silently identical to frequency-only.
+            # L2 distance from each cohort to the last population state. If any
+            # cohort is past the threshold, update the population now. Before the
+            # first update the population adapter is all zeros (the identity), so
+            # divergence is measured from zero; it does not wait for a frequency
+            # update to happen first.
             pop_state = self.population_adapter_state or {}
             divs = []
             for cs in self.cohort_states.values():
@@ -511,23 +465,17 @@ class HierarchicalCoordinator:
             cohort_states = list(self.cohort_states.values())
             cohort_counts = [round_log.get(f"cohort_{h}_n_seen", 1)
                              for h in self.cohort_states]
-            # Per-cohort task loss from this round's cohort-training step, in the
-            # same hospital order as ``cohort_states``/``cohort_counts``.
-            # ``weighting_scheme="uncertainty"`` takes 1/loss, so a centre whose
-            # adapter fits its own data well contributes more to the population.
-            #
-            # Omitting this is what made the whole `uncertainty` arm crash:
-            # ``_weights_for`` raises "uncertainty weighting requires losses"
-            # when it gets None, and the 2026-08-08 fix only wired losses into
-            # the patient->cohort call, not this cohort->population one.
+            # Per-cohort task loss from this round, in the same order as
+            # cohort_states. Uncertainty weighting uses 1 / loss, so a centre whose
+            # adapter fits its data well counts more.
             cohort_losses = [
                 round_log.get(f"cohort_{h}_loss") if
                 round_log.get(f"cohort_{h}_loss") is not None else 1.0
                 for h in self.cohort_states
             ]
-            # Recency at this level is the newest data any of the cohort's own
-            # patients contributed, so a centre that has not seen recent data
-            # decays. Falls back to None (and a warning) if unavailable.
+            # Recency at this level: the newest data any of the cohort's patients
+            # contributed, so a centre without recent data counts less. None (with a
+            # warning) if unavailable.
             cohort_times = [round_log.get(f"cohort_{h}_latest_time")
                             for h in self.cohort_states]
             if self.cfg.use_flower:
@@ -551,29 +499,17 @@ class HierarchicalCoordinator:
                                             ("n_patients", n_patient_trigger),
                                             ("divergence", diverge_trigger)) if on]
             round_log["update_trigger"] = "+".join(fired) if fired else "none"
-            # Reset the patient-update budget only when a sync actually happens.
+            # Reset the patient-update count only when a sync actually happens.
             self.patients_since_sync = 0
 
-            # --- Step 5: top-down refresh — DEFERRED to the next round ---
-            # The refresh re-seeds cohorts FROM the updated population, i.e. it is
-            # the starting point for round r+1. Applying it here and returning
-            # meant the caller evaluated round r on state that had already been
-            # pulled toward the population — attenuating the very thing being
-            # measured, and only for `hierarchical` (the other methods push the
-            # sync out of reach and never refresh).
-            #
-            # The magnitude is not small. At the first sync the population adapter
-            # does not exist yet, so propagate_cohorts_to_population returns
-            # eta_population * mean(cohorts) = 0.1 * mean. The refresh then gives
-            #   cohort <- 0.7*cohort + 0.3*(0.1*mean) ~= 0.73 * cohort
-            # and the FFN adapter is a RESIDUAL that is identity at init, so
-            # scaling it by 0.73 moves the model ~27 % back toward the UNADAPTED
-            # population model, immediately before the reported evaluation.
-            # `hierarchical` selecting round 1 in every completed cell, while
-            # fedavg selected round 5, is what that looks like from the outside.
+            # Step 5: top-down refresh, deferred to the next round. The refresh is
+            # the starting point for round r+1. Applying it now would change the
+            # state that is about to be evaluated for round r. At the first sync
+            # that shrinks the cohort adapter by about 27 %, pulling hierarchical
+            # back towards the un-adapted model right before it is measured.
             if self.cfg.refresh_cohort_from_population:
                 if self.cfg.use_flower:
-                    # Applied by each client on receipt of the broadcast, next round.
+                    # Each client applies it when the next broadcast arrives.
                     self._flower_refresh_pending = True
                 else:
                     self._refresh_pending = True

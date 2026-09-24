@@ -1,20 +1,20 @@
-"""Personalisation ablation runner for TFN + FFN-adapter pipeline (WP3).
+"""Per-patient personalisation ablation for the TFN + FFN-adapter pipeline (WP3).
 
-Per-patient mode (default): for each held-out patient, chronologically split
-the patient's samples early/late, copy the population classifier, personalise
-on the early half, predict on the late half. Predictions pooled across patients
-for personal AUC. Population retention measured on patients NOT in the cohort.
+For each held-out patient: split their windows by time into early and late, copy the
+population classifier, personalise it on the early half, and predict the late half.
+Predictions are pooled across patients for a personal AUROC. Retention of population
+performance is measured on patients outside the set.
 
-Strategies covered:
-    A0_full_ft        — full fine-tune
-    A1_head_only      — head only
-    A2_ffn            — FFN adapter (Houlsby) + head
-    A3_ffn_ewc        — FFN + EWC anchor
-    A4_ffn_replay     — FFN + population replay
-    A5_ffn_distill    — FFN + population distillation
+Strategies: A0_full_ft full fine-tune A1_head_only head only A2_ffn FFN adapter
+(Houlsby) + head A3_ffn_ewc FFN + EWC A4_ffn_replay FFN + population replay
+A5_ffn_distill FFN + population distillation
+
+This is a standalone study, not part of the reported grid. It also defines the
+collate and label functions the harness uses.
 
 Usage::
-    cocofl_ablation_tfn \\
+
+    cocofl_personalize \\
         model_path=/path/to/best_model.pt \\
         train_dir=/path/to/mimic-train \\
         input_dir=/path/to/mimic-test \\
@@ -72,17 +72,14 @@ STRATEGIES = (
 )
 
 
-# ---- collate + label fns (TFN-format batches) -------------------------------
+# Collate and label functions (TFN-format batches)
 
 def make_collate(cat_by_pid, num_by_pid, dataset=None):
     """Collate for the WP4/WP5 harness.
 
-    ``dataset`` must be supplied to get REAL inter-event times to the T-LSTM. It
-    used to be absent, and elapsed was synthesised as all-ones, which collapsed
-    the time-decay to a constant and ran the backbone outside its training
-    distribution — see cocofl.data.elapsed for the measurements. Falling back is
-    still possible (some ablation entry points build a collate before the dataset
-    exists) but it WARNS, because a silent fallback here is the original defect.
+    Pass ``dataset`` so the T-LSTM gets real inter-event times (see
+    cocofl.data.elapsed). Without it the collate falls back to a constant gap of 1
+    and warns; some ablation entry points build a collate before the dataset exists.
     """
     from ..data.elapsed import dataset_supports_elapsed, elapsed_for_window
 
@@ -104,8 +101,8 @@ def make_collate(cat_by_pid, num_by_pid, dataset=None):
         cats = torch.stack([cat_by_pid.get(pid, torch.zeros(3, dtype=torch.long)) for pid in pids])
         nums = torch.stack([num_by_pid.get(pid, torch.zeros(NUMERICAL_DIM, dtype=torch.float32)) for pid in pids])
         if use_real:
-            # Reconstruct each window's real Δt (hours) from the token index the
-            # dataset already records, so the T-LSTM sees what it was trained on.
+            # Rebuild each window's real time gaps (hours) from the token index the
+            # dataset records, so the T-LSTM sees what it was trained on.
             elapsed = torch.stack([
                 elapsed_for_window(dataset, b[1]["data_idx"], xs.size(1))
                 for b in batch
@@ -116,8 +113,8 @@ def make_collate(cat_by_pid, num_by_pid, dataset=None):
             "expected": [b[1]["expected"] for b in batch],
             "patient_id": [b[1].get("patient_id") for b in batch],
             "prediction_time": [b[1].get("prediction_time") for b in batch],
-            # Needed by time-bounded tasks (see constants.TASK_HORIZONS): elapsed
-            # microseconds from the prediction point to the outcome token.
+            # For time-limited tasks (see constants.TASK_HORIZONS): microseconds
+            # from the prediction point to the outcome token.
             "true_token_time": [b[1].get("true_token_time") for b in batch],
         }
         return (xs, elapsed, cats, nums), labels
@@ -125,11 +122,11 @@ def make_collate(cat_by_pid, num_by_pid, dataset=None):
 
 
 def make_label_fn(task_name: str):
-    """Binary label fn for ``task_name``.
+    """Binary label function for ``task_name``.
 
-    For tasks with a horizon in ``constants.TASK_HORIZONS`` (e.g. readmission =
-    30 days) the outcome token must ALSO fall within that horizon; a qualifying
-    event later than the horizon counts as a negative.
+    For tasks with a horizon in ``constants.TASK_HORIZONS`` (e.g. readmission, 30
+    days) the outcome must also fall within the horizon; a later event counts as
+    negative.
     """
     pos = POSITIVE_TOKENS[task_name]
     horizon_us = horizon_microseconds(task_name)
@@ -159,7 +156,7 @@ def make_loader(dataset, indices, collate_fn, batch_size: int = 1, shuffle: bool
     )
 
 
-# ---- model loading ----------------------------------------------------------
+# Model loading
 
 def build_population_classifier(model_path: str | Path, device: torch.device,
                                  num_classes: int = 1) -> TFNDownstreamClassifier:
@@ -186,7 +183,7 @@ def offline_head_finetune(classifier, train_dataset, train_idx, label_fn, n_iter
     )
 
 
-# ---- strategy dispatch ------------------------------------------------------
+# Strategy dispatch
 
 def run_strategy(name: str, base_classifier: TFNDownstreamClassifier,
                   train_loader: DataLoader, label_fn, cfg: PersonalizeConfig,
@@ -202,7 +199,7 @@ def run_strategy(name: str, base_classifier: TFNDownstreamClassifier,
         personalize_ffn(clf, train_loader, label_fn, cfg, device)
     elif name == "A3_ffn_ewc":
         attach_ffn_adapter(clf.backbone, attr="patient_adapter")
-        # Consolidate Fisher on the per-patient train set (small but local context).
+        # Fisher information on this patient's training windows.
         ewc = EWCRegularizerTFN.from_classifier(
             clf, train_loader, label_fn, device, lambda_ewc=1000.0, max_batches=8,
         )
@@ -228,7 +225,7 @@ def run_strategy(name: str, base_classifier: TFNDownstreamClassifier,
     return clf
 
 
-# ---- per-patient split ------------------------------------------------------
+# Per-patient split
 
 @dataclass
 class PerPatientSplit:
@@ -387,7 +384,7 @@ def main(cfg: DictConfig):
 
     Vocabulary.from_path(test_dir)
 
-    # Build static-feature lookups from train + test directories
+    # Static-feature lookups from the train and test folders
     with open(test_dir / STATIC_DATA_FN, "rb") as f:
         test_static = pickle.load(f)
     test_cat, test_num = build_static_arrays(test_static)

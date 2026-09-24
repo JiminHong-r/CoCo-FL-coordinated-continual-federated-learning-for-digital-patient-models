@@ -1,21 +1,11 @@
-"""MACRO must mean the same thing at every α, for every task and method.
+"""MACRO must mean the same thing at every alpha, for every task and method.
 
-Three defects this pins, all of which produced numbers that looked comparable
-and were not:
-
-* **No evidence floor.** A Dirichlet draw at low α leaves centres with a handful
-  of patients — at α=0.1 hospital 2 holds 69 — and their AUROCs are coin flips.
-  ``readmission`` at α=0.1 scored 0.4 / 0.5 / 0.3 / 0.8 across four methods on
-  one such centre. Averaged with equal weight, a 10-pair centre moved MACRO as
-  much as a 100,000-pair one, so MACRO could not be compared across α.
-* **Sizes only from population_only.** ``n_eval_windows`` was read off
-  ``pop_res``, but the WP4 ablations run ``hierarchical`` alone, so their CSVs
-  carried no sizes and no confidence intervals — nothing to compare against the
-  main runs with.
-* **No record of which round was selected.** When selection lands on round 0 the
-  method IS the population baseline, so every ablation knob is a no-op and all
-  arms report bit-identical numbers. Three CL strategies "agreeing" to 16
-  decimal places at α=0.1 was that, not a finding.
+* Evidence floor: at low alpha a centre can be tiny (69 patients at alpha=0.1) and
+its AUROC is close to a coin flip, yet with equal weight it moves MACRO as much as a
+large centre. * Sizes from any method: runs with only ``hierarchical`` (the WP4
+ablations) must still report eval-set sizes and confidence intervals. * Record the
+selected round: if selection picks round 0 the method equals the population
+baseline, and all arms give identical numbers.
 """
 from __future__ import annotations
 
@@ -27,7 +17,7 @@ from cocofl.evaluation.run_evaluation import (
 from cocofl.evaluation.result import MethodResult
 
 
-# --- evidence floor -------------------------------------------------------
+# Evidence floor
 
 def test_centre_with_too_few_positives_is_excluded():
     ns = {0: 100_000, 1: 500}
@@ -44,7 +34,7 @@ def test_centre_with_too_few_negatives_is_excluded():
 
 
 def test_the_alpha_0_1_case_that_motivated_this():
-    """69-patient centre against a 134,000-patient one."""
+    """A 69-patient centre next to a 134,000-patient one."""
     ns = {0: 246_000, 2: 104}
     n_pos = {0: 5_100, 2: 2}
     keep = _reportable_hospitals([0, 2], ns, n_pos, min_pos=10, min_neg=10)
@@ -52,7 +42,7 @@ def test_the_alpha_0_1_case_that_motivated_this():
 
 
 def test_unknown_sizes_are_kept():
-    """Absent evidence of a problem, dropping a cell would hide a real result."""
+    """Hospitals with unknown sizes are kept, not silently dropped."""
     keep = _reportable_hospitals([0, 1], {}, {}, min_pos=10, min_neg=10)
     assert keep == [0, 1]
 
@@ -63,7 +53,7 @@ def test_floor_of_zero_reproduces_the_old_unguarded_behaviour():
     assert keep == [0, 1], "min_eval_pos=0 must restore the legacy averages"
 
 
-# --- restricted macro -----------------------------------------------------
+# MACRO over the kept hospitals only
 
 def test_macro_ignores_hospitals_outside_the_floor():
     aucs = {0: 0.90, 1: 0.30}         # hospital 1 is the coin flip
@@ -80,10 +70,10 @@ def test_macro_of_nothing_is_none():
     assert _macro_over({0: 0.9}, []) is None
 
 
-# --- sizes travel with every method --------------------------------------
+# Sizes come with every method
 
 def test_sizes_fall_back_to_whichever_method_ran():
-    """The ablations run `hierarchical` alone — sizes must still be found."""
+    """The ablations run only hierarchical; the sizes must still be found."""
     empty = MethodResult()
     hier = MethodResult(ns={0: 1_234}, n_pos={0: 56})
     ns, n_pos = _eval_sizes(empty, hier)
@@ -100,7 +90,7 @@ def test_sizes_of_no_results_are_empty_not_an_error():
     assert _eval_sizes(MethodResult()) == ({}, {})
 
 
-# --- selection provenance -------------------------------------------------
+# Which round was selected
 
 def test_method_result_records_selected_round_and_movement():
     r = MethodResult(selected_round=0, selected_delta_norm=0.0)
@@ -109,9 +99,7 @@ def test_method_result_records_selected_round_and_movement():
 
 
 def test_selected_round_defaults_to_none_not_zero():
-    """None means "not recorded"; 0 is a real, meaningful answer (no adaptation
-    was selected). Conflating them would make an unrecorded run look like a
-    round-0 fallback."""
+    """None means "not recorded"; 0 is a real answer (no adaptation selected). The two must not be confused."""
     assert MethodResult().selected_round is None
 
 

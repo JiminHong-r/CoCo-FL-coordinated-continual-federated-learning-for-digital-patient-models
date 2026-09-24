@@ -1,15 +1,13 @@
 """Houlsby-style FFN adapters for TFNFullModel.
 
-A small bottleneck FFN inserted at the output of the LSTM encoder (before the
-LM head / classifier). The base model is frozen during personalisation; only
-the adapter (and the classifier head, if used) trains.
+A small bottleneck FFN placed after the LSTM encoder, before the LM head or
+classifier. The base model stays frozen; only the adapter (and the head, if enabled)
+trains::
 
-Adapter:
     x -> Linear(hidden, bottleneck) -> GELU -> Linear(bottleneck, hidden) -> x + delta
 
-The up-projection is initialised to zero so the adapter starts as an identity
-function. This matches the Houlsby et al. ("Parameter-Efficient Transfer
-Learning for NLP", ICML 2019) recipe.
+The up-projection starts at zero, so the adapter begins as the identity (Houlsby et
+al., "Parameter-Efficient Transfer Learning for NLP", ICML 2019).
 """
 from __future__ import annotations
 
@@ -35,7 +33,7 @@ class FFNAdapter(nn.Module):
             self.act = nn.ReLU()
         else:
             raise ValueError(f"unknown activation: {activation}")
-        # Identity-at-init: up-projection is zero so the residual passes through unchanged.
+        # Start as the identity: a zero up-projection leaves the residual unchanged.
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
@@ -47,17 +45,13 @@ def attach_ffn_adapter(model, bottleneck: int = 64, *, attr: str,
                        freeze_base: bool = True) -> nn.Module:
     """Attach an FFNAdapter to ``model`` as ``model.<attr>``.
 
-    ``attr`` is REQUIRED and keyword-only: it used to default to the legacy
-    ``ffn_adapter`` slot, so a caller that forgot to name a level silently got a
-    third adapter applied after cohort and patient. There are only two levels.
+    ``attr`` is required and keyword-only, so every caller names the level
+    ("cohort_adapter" or "patient_adapter"). ``TFNFullModel`` applies whatever is in
+    these slots to the hidden states after the encoder. The base parameters are
+    frozen.
 
-    Sets the adapter into the model's pre-declared slot. ``TFNFullModel`` checks
-    this slot in its forward pass and applies the adapter to the post-encoder
-    hidden states. The base parameters are frozen by default.
-
-    Idempotent: re-calling on an already-wrapped model returns the existing
-    adapter (no overwrite). Safe under deepcopy because no closures capture
-    references to the original model.
+    Calling it again on a model that already has the adapter returns the existing
+    one. Safe to deepcopy.
     """
     existing = getattr(model, attr, None)
     if existing is not None:
@@ -69,7 +63,7 @@ def attach_ffn_adapter(model, bottleneck: int = 64, *, attr: str,
     setattr(model, attr, adapter)
 
     if freeze_base:
-        # Freeze everything that isn't part of the adapter
+        # Freeze everything that is not part of the adapter
         adapter_prefix = f"{attr}."
         for n, p in model.named_parameters():
             if not n.startswith(adapter_prefix):
@@ -78,10 +72,10 @@ def attach_ffn_adapter(model, bottleneck: int = 64, *, attr: str,
 
 
 def adapter_state_dict(model: nn.Module, *, attr: str) -> dict[str, torch.Tensor]:
-    """Return only the adapter A/B parameters keyed by their module path.
+    """Only the adapter's parameters, keyed by module path.
 
-    Used by federated / continual code to transmit/save adapter weights without
-    the entire (frozen) backbone.
+    Lets federated and continual code send or save adapter weights without the
+    frozen backbone.
     """
     adapter = getattr(model, attr, None)
     if adapter is None:
@@ -107,16 +101,13 @@ HEAD_PREFIX = "classifier."
 
 
 def head_bias_parameters(classifier) -> list[tuple[str, "torch.nn.Parameter"]]:
-    """The classifier head's bias parameters, as ``(name, param)``.
+    """The classifier head's bias parameters (the intercepts), as ``(name, param)``.
 
-    These are the intercepts. Under a label shift — which is what a class-aware
-    federated split creates, with per-centre positive rates spanning 0.42 % to
-    3.10 % — the Bayes-optimal correction is a change to the intercept, not to
-    the representation. With the head fully frozen the only way to express that
-    correction is to distort features through a fixed decision boundary, which
-    is measurably worse for ranking (local_finetune: ‖Δ‖=5.05, ECE 0.253→0.157,
-    AUROC −0.016). Unfreezing just these makes the correction expressible at a
-    cost of a handful of floats per round.
+    The class-aware split mostly shifts base rates between centres (0.42 % to 3.10 %
+    positive), and the right fix for a base-rate shift is to change the intercept,
+    not the representation. With the head frozen, the adapter can only fake that by
+    distorting features, which hurt ranking. Training just these few numbers makes
+    the fix possible.
     """
     return [(n, p) for n, p in classifier.classifier.named_parameters()
             if n.endswith("bias")]
@@ -125,25 +116,19 @@ def head_bias_parameters(classifier) -> list[tuple[str, "torch.nn.Parameter"]]:
 def level_state_dict(classifier, attr: str = "cohort_adapter",
                      include_head: bool = True,
                      head_bias_only: bool = False) -> dict[str, torch.Tensor]:
-    """Everything one adaptation level learns: its adapter, plus the head.
+    """Everything one adaptation level learns: its adapter, plus the head if trained.
 
-    Cohort and patient training unfreeze ``classifier.classifier`` (see
-    ``coordinator._train_cohorts`` and ``patient.build_patient_classifier``), so
-    the head is part of what a level actually learns. Persisting only the
-    adapter meant the trained head was discarded at the end of every round and
-    the adapter was then evaluated against the *population's* head — a head it
-    was never co-adapted with. FedAvg never had this problem because
-    ``federated_state_dict`` already carried its head.
+    When a level trains the classifier head, the head is part of what it learned and
+    must be saved with the adapter; otherwise the adapter would later be scored
+    against the population's head, which it was not trained with.
 
-    Keys are ``<attr>.<param>`` for the adapter and ``classifier.<param>`` for
-    the head, so the two namespaces stay distinguishable when deltas are
-    aggregated across levels.
+    Keys are ``<attr>.<param>`` for the adapter and ``classifier.<param>`` for the
+    head, so the two stay distinguishable when deltas are aggregated across levels.
     """
     state = adapter_state_dict(classifier.backbone, attr=attr)
     if head_bias_only:
-        # Only the intercepts travel. Communication cost is a few floats, so
-        # adapter-only transfer (and the 162.5x saving) is preserved — the whole
-        # saved head file is ~529 KB, larger than the 264 KB adapter payload.
+        # Only the intercepts travel: a few numbers, so the adapter-only saving is
+        # kept (the whole head file is ~529 KB, bigger than the 264 KB adapter).
         for n, p in head_bias_parameters(classifier):
             state[f"{HEAD_PREFIX}{n}"] = p.detach().clone()
     elif include_head:

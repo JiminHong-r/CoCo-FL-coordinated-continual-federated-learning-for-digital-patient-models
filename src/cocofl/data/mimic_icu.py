@@ -19,11 +19,10 @@ class ICUAdmissionDataset(InferenceDataset):
         super().__init__(input_dir, n_positions, **kwargs)
         self.stop_stokens = [ST.ICU_ADMISSION, ST.DISCHARGE] + self.stop_stokens
         self.adm_indices = self._get_indices_of_stokens(ST.ADMISSION)
-        # Prediction point = admission token + 2 (the admission stoken takes 3
-        # slots). Exposed as ``start_indices`` like every other task dataset:
-        # callers that map a sample back to its token index (patient-list
-        # filters, length-bucketed batching) key on that name, and silently fall
-        # back to treating the SAMPLE index as a token index when it is absent.
+        # Prediction point = admission token + 2 (the admission token takes 3
+        # slots). Stored as start_indices like in every other task dataset, because
+        # code that maps a sample back to its token (patient filters,
+        # length-bucketed batching) looks for that name.
         self.start_indices = self.adm_indices + 2
 
         icu_adm_or_dc_or_dth_indices = self._get_indices_of_stokens(

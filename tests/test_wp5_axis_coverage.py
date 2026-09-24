@@ -1,19 +1,10 @@
 """WP5 axes 3, 4 and 6 must report what the task description asks for.
 
-Three requirements the harness did not meet, each invisible because the CSV
-simply had no column for them:
-
-* **Axis 4** — "improvement in **population** model performance attributable to
-  cohort-level aggregation". Only the patient->cohort direction was measured
-  (``patient_propagation_gain``). The cohort->population direction is the upward
-  half of the bidirectional loop and therefore the project's central claim, and
-  it was never scored.
-* **Axis 3** — "population model stability: tracking performance on a held-out
-  global validation set **across all update rounds**". The population model was
-  scored once, not per round, so there was no stability curve.
-* **Axis 6** — "number of parameters updated per synchronisation round (per
-  level)" and total cost "in equivalent **parameter counts**". Only bytes were
-  reported; same information, wrong unit, and no per-level breakdown.
+* Axis 4: the population model's gain from cohort aggregation (the upward half of
+the loop), not only the patient-to-cohort gain. * Axis 3: population stability
+across all update rounds, i.e. the population model scored every round. * Axis 6:
+parameters updated per synchronisation round, per level, and total cost in parameter
+counts, not only bytes.
 """
 from __future__ import annotations
 
@@ -26,7 +17,7 @@ from cocofl.evaluation.metrics import (
 )
 
 
-# --- axis 6: parameter counts per level -----------------------------------
+# Axis 6: parameter counts per level
 
 def test_parameters_updated_counts_a_state_dict():
     state = {"a": torch.zeros(3, 4), "b": torch.zeros(5)}
@@ -34,7 +25,7 @@ def test_parameters_updated_counts_a_state_dict():
 
 
 def test_parameters_updated_is_none_for_an_absent_level():
-    """None distinguishes "this level never synced" from "it synced 0 params"."""
+    """None means the level never synced, which differs from syncing 0 parameters."""
     assert parameters_updated(None) is None
 
 
@@ -48,7 +39,7 @@ def test_naive_full_model_parameters_counts_the_whole_model():
 
 
 def test_adapter_is_orders_of_magnitude_cheaper_than_the_full_model():
-    """The axis-6 claim in the TD's own unit rather than in bytes."""
+    """The axis 6 claim in the TD's unit (parameters) rather than bytes."""
     adapter = {"down.weight": torch.zeros(64, 512), "down.bias": torch.zeros(64),
                "up.weight": torch.zeros(512, 64), "up.bias": torch.zeros(512)}
     full = nn.Sequential(nn.Linear(512, 512), nn.Linear(512, 512))
@@ -56,7 +47,7 @@ def test_adapter_is_orders_of_magnitude_cheaper_than_the_full_model():
     assert ratio > 5, "adapter-only transfer must be materially cheaper"
 
 
-# --- axes 3 + 4: the population trajectory --------------------------------
+# Axes 3 and 4: the population trajectory
 
 def _gain(traj, baseline):
     vals = [a for a in traj if a is not None]
@@ -73,8 +64,7 @@ def test_population_gain_is_measured_against_the_frozen_baseline():
 
 
 def test_population_gain_can_be_negative():
-    """Aggregating cohorts upward is not guaranteed to help; the column must be
-    able to say so rather than only reporting improvements."""
+    """Aggregating cohorts upward need not help; the column must be able to show a loss."""
     assert _gain([0.70, 0.66], baseline=0.70) < 0
 
 
@@ -87,8 +77,7 @@ def test_population_gain_is_none_when_no_sync_ever_happened():
 
 
 def test_rounds_before_the_first_sync_report_the_baseline():
-    """Before any cohort->population sync the population IS the frozen model, so
-    the trajectory should start flat rather than be blank."""
+    """Before the first sync the population is the frozen model, so the trajectory starts flat instead of blank."""
     traj = [0.70, 0.70, 0.73]
     assert traj[0] == 0.70
     assert _gain(traj, 0.70) == pytest.approx(0.03)

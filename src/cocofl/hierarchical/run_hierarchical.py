@@ -1,13 +1,18 @@
-"""WP4 main: hierarchical bidirectional adaptation (CoCo-FL).
+"""Run the hierarchical loop on its own, outside the comparison harness (WP4).
 
-Population (frozen)  -+-> Cohort A adapter <-- aggregated patient deltas
-                       |
-                       +-> Cohort B adapter <-- ...
-                       |
-                       +-> Cohort C adapter <-- ...
-                            ^   |
-              EMA blend     |   v (init from cohort)
-                            +-- Patient adapters
+::
+
+    Population (frozen)  -+-> Cohort A adapter <-- aggregated patient deltas
+                           |
+                           +-> Cohort B adapter <-- ...
+                           |
+                           +-> Cohort C adapter <-- ...
+                                ^   |
+                  EMA blend     |   v (init from cohort)
+                                +-- Patient adapters
+
+Every reported number comes from ``cocofl_evaluate`` instead. This module also holds
+the loader and classifier builders the harness uses.
 
 Usage::
 
@@ -52,15 +57,12 @@ from .patient import PatientConfig
 
 def build_population_classifier(model_path: Path, device: torch.device,
                                  head_path: Path | None = None) -> TFNDownstreamClassifier:
-    """Population model = pretrained backbone + (optionally) its trained head.
+    """The population model: the pre-trained backbone plus, optionally, its trained head.
 
-    The checkpoint holds only the backbone and its language-model head, so
-    without ``head_path`` the downstream classifier head is RANDOMLY
-    INITIALISED. Every WP4/WP5 method then starts from backbone + noise:
-    ``population_only`` scores at chance, and Δ_cohort measures "was a head
-    trained at all" rather than whether cohort adaptation helps. Pass the head
-    fitted on the 40%% reserve (``cocofl_finetune +save_head_dir=...``) so the
-    population level is the WP3 population model the spec assumes.
+    The checkpoint holds only the backbone and its language-model head, so without
+    ``head_path`` the classifier head is random and ``population_only`` scores at
+    chance. Pass the head fitted on the 40%% reserve (``cocofl_finetune
+    +save_head_dir=...``) to get the WP3 population model.
     """
     ck = torch.load(model_path, map_location=device, weights_only=False)
     cfg = ck["model_config"]
@@ -90,12 +92,11 @@ def build_population_classifier(model_path: Path, device: torch.device,
 
 
 def build_hospital_train_loader(dataset, indices, collate_fn, batch_size=1, seed=42):
-    """Shuffled cohort-training loader for one centre's partition.
+    """Shuffled cohort-training loader for one centre.
 
-    Delegates to ``make_train_loader`` so that ``batch_size > 1`` is actually
-    usable: downstream windows are variable-length, so a plain DataLoader would
-    fail in ``collate``'s ``torch.stack`` above batch 1. Length-bucketing keeps
-    each batch homogeneous, so no padding enters the T-LSTM recurrence.
+    Uses ``make_train_loader`` so ``batch_size > 1`` works: windows have different
+    lengths, and batching by length keeps each batch the same length, so no padding
+    enters the T-LSTM.
     """
     return make_train_loader(dataset, indices, collate_fn,
                              batch_size=batch_size, seed=seed)
@@ -104,16 +105,12 @@ def build_hospital_train_loader(dataset, indices, collate_fn, batch_size=1, seed
 def build_patient_streams(dataset, pids, collate_fn, train_frac=0.5,
                            min_samples=60, max_patients=20, eval_batch_size=1,
                            patient_batch_size=8):
-    """Returns a list of ``(patient_id, fit_loader, val_loader, eval_loader)``.
+    """Return a list of ``(patient_id, fit_loader, val_loader, eval_loader)``.
 
-    ``min_samples`` is the statistically load-bearing knob. At the default of 4
-    a qualifying patient contributes 2 training windows and — because the split
-    is 50/50 by time — only **2 evaluation windows**, so their personal AUROC
-    can only take the values {0, 0.5, 1}. Raising it (e.g. 20 → 10 eval windows)
-    is what makes per-patient AUROC, and therefore Δ_patient, a measurable
-    quantity rather than a coin flip. It costs patients: the mean window count
-    per admitted patient is ~2.4, so a higher threshold selects a smaller and
-    more admission-heavy subset.
+    ``min_samples`` (default 60) decides whether a per-patient AUROC means anything.
+    With very few windows a patient has only one or two evaluation windows, and the
+    AUROC can only be 0, 0.5 or 1. A higher threshold admits fewer patients, and
+    those tend to have more admissions.
     """
     buckets = per_patient_subsets(dataset, min_samples=min_samples)
     streams = []
@@ -123,30 +120,21 @@ def build_patient_streams(dataset, pids, collate_fn, train_frac=0.5,
         early, late = split_indices_by_time(dataset, buckets[pid], train_frac=train_frac)
         if not early or not late:
             continue
-        # Three-way, chronological: fit / val / eval. The val slice is what lets
-        # the patient adapter be ACCEPTED OR REJECTED on held-out data — without
-        # it the only held-out windows are the eval ones, and selecting on those
-        # would be selecting on the test set. The cohort layer has had this
-        # protection since model selection was added; the patient layer did not,
-        # which is why delta_patient averaged -0.099 while delta_cohort sat at 0.
+        # Split each patient's windows by time into fit, validation and eval. The
+        # adapter is accepted or rejected on validation; choosing on the eval
+        # windows would be choosing on test.
         fit, val = split_indices_by_time(dataset, early, train_frac=0.7)
         if not fit or not val:
             continue
-        # Length-bucketed batches, like every other training loader. At batch 1
-        # with n_iters=10 the patient adapter saw TEN windows to fit 66 K
-        # parameters — it memorised them and then failed validation, which is
-        # why patient selection rejected every adapter. Same defect the WP3
-        # probe had (batch_size=1 on a starved step budget); it was never
-        # checked at the patient level.
+        # Length-bucketed batches, like the other training loaders. At batch 1 with
+        # few iterations the adapter sees only a handful of windows and memorises
+        # them.
         t = make_train_loader(dataset, fit, collate_fn,
                               batch_size=patient_batch_size, seed=42)
         v = make_eval_loader(dataset, val, collate_fn, batch_size=eval_batch_size)
         e = make_eval_loader(dataset, late, collate_fn, batch_size=eval_batch_size)
-        # The patient id travels WITH the loaders. Spec WP5 axis 2 asks for
-        # "analysis of when and for which patient subgroups personalisation is
-        # most beneficial", which is impossible from pooled per-hospital numbers:
-        # it needs a per-patient record joinable to that patient's attributes.
-        # Discarding pid here made that analysis unreconstructable after the fact.
+        # Keep the patient id with the loaders, so per-patient results can be joined
+        # to patient attributes later (axis 2 subgroup analysis).
         streams.append((pid, t, v, e))
         if len(streams) >= max_patients:
             break
@@ -155,7 +143,7 @@ def build_patient_streams(dataset, pids, collate_fn, train_frac=0.5,
 
 def evaluate_with_states(template, cohort_state, patient_state, eval_loader,
                           label_fn, device, cohort_bot, patient_bot):
-    """Build a classifier with given cohort + patient adapter states and AUC-eval."""
+    """Build a classifier with the given cohort and patient adapter states and return its AUROC."""
     clf = copy.deepcopy(template)
     attach_ffn_adapter(clf.backbone, bottleneck=cohort_bot, attr="cohort_adapter")
     load_level_state_dict(clf, cohort_state, attr="cohort_adapter")
@@ -181,8 +169,8 @@ def main(cfg: DictConfig):
     max_patients_per_hospital = int(getattr(cfg, "max_patients_per_hospital", 20))
     n_patient_iters = int(getattr(cfg, "n_patient_iters", 50))
     cohort_bottleneck = int(getattr(cfg, "cohort_bottleneck", 64))
-    # patient_bottleneck must match cohort_bottleneck for upward propagation
-    # (the deltas have the same shape as the cohort adapter weights).
+    # The patient bottleneck must equal the cohort one for upward propagation (the
+    # deltas have the cohort adapter's shape).
     patient_bottleneck = int(getattr(cfg, "patient_bottleneck", cohort_bottleneck))
     cohort_local_steps = getattr(cfg, "cohort_local_steps", 100)
     cohort_local_epochs = int(getattr(cfg, "cohort_local_epochs", 1))
@@ -194,8 +182,8 @@ def main(cfg: DictConfig):
     n_pop_eval = int(getattr(cfg, "n_pop_eval", 500))
     seed = int(getattr(cfg, "seed", 42))
     tasks_filter = getattr(cfg, "tasks", None)
-    # When ``splits_dir`` is set we load fixed federated splits (train/val/test
-    # per hospital) from JSON instead of redrawing the Dirichlet inline.
+    # With ``splits_dir`` set, load the fixed train/val/test splits from JSON
+    # instead of drawing a Dirichlet split here.
     splits_dir = getattr(cfg, "splits_dir", None)
     eval_per_hosp_cfg = int(getattr(cfg, "eval_per_hospital", 200))
 
@@ -229,7 +217,7 @@ def main(cfg: DictConfig):
         hospital_patient_streams = {}
 
         if splits_dir is not None:
-            # Fixed split path: load train + test partitions from disk.
+            # Fixed split: load the train and test partitions from disk.
             from ..federated import load_split, as_hospital_split
             split_data = load_split(splits_dir, alpha)
             train_split = as_hospital_split(split_data, partition="train")
@@ -257,7 +245,7 @@ def main(cfg: DictConfig):
                     batch_size=1, shuffle=False, collate_fn=collate_fn,
                 )
         else:
-            # Legacy inline Dirichlet (kept for back-compat smoke tests)
+            # Inline Dirichlet split (for quick smoke runs)
             split = dirichlet_split_patients(all_pids, num_hospitals, alpha, seed=seed)
             split.bind_to_dataset(test_ds)
             print(summarize_split(split))
@@ -306,7 +294,7 @@ def main(cfg: DictConfig):
             label_fn, device, cfg=coord_cfg,
         )
 
-        # Baseline AUC: population-only, no adapters
+        # Baseline: the population model with no adapters
         pop_eval_indices = sorted({
             idx for ld in hospital_train_loaders.values()
             for idx in ld.dataset.indices
@@ -319,11 +307,12 @@ def main(cfg: DictConfig):
                          "global_auc": baseline.auc})
         pd.DataFrame(all_rows).to_csv(output_dir / "hierarchical_history.csv", index=False)
 
-        # Run rounds
+        # Rounds
         for r in range(1, rounds + 1):
             log = coordinator.run_round()
-            # Evaluate cohort models (no patient adapter) on a held-out per-hospital
-            # eval pool — patient-late-only sets were too tiny / single-class.
+            # Score the cohort models (no patient adapter) on a per-hospital eval
+            # pool; the patients' own late windows are too few and often
+            # single-class.
             for hid in coordinator.cohort_states:
                 if hid not in hospital_eval_loaders:
                     continue

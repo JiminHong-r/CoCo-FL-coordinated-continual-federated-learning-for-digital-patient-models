@@ -1,17 +1,10 @@
 """WP4 task 5: the divergence trigger must be able to fire.
 
-The coordination protocol syncs the population on FREQUENCY or on DIVERGENCE.
-The divergence branch used to be guarded by
-``population_adapter_state is not None``, but that state is only ever assigned
-*inside* the trigger block — so divergence could not fire until a frequency
-update had already happened. At the default ``population_update_freq ==
-max_rounds`` (one sync, on the final round) that meant it never fired, and a run
-configured with a divergence threshold produced results identical to
-frequency-only. An ablation over triggering conditions would have reported "no
-difference" as a finding.
-
-Before the first sync the population adapter is the zero state, so divergence is
-just the cohort's own norm — which is measurable from round 1.
+The population syncs on frequency or on divergence. Divergence used to be checked
+only once a population state existed, which only happens after a sync, so with one
+sync at the final round it never fired and divergence runs matched frequency-only
+runs. Before the first sync the population adapter is all zeros, so divergence is
+just the cohort's own norm, measurable from round 1.
 """
 from __future__ import annotations
 
@@ -19,7 +12,7 @@ import torch
 
 
 def _divergence(cohort_states, pop_state):
-    """Mirrors the coordinator's divergence computation."""
+    """Same divergence computation as the coordinator."""
     pop_state = pop_state or {}
     divs = []
     for cs in cohort_states.values():

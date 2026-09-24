@@ -19,33 +19,26 @@ from .utils import configure_optimizers, get_lr
 
 @hydra.main(version_base=None, config_path="../configs", config_name="population_training")
 def main(cfg: DictConfig):
-    """This training script can be run both on a single gpu in debug mode, and also in a larger
-    training run with distributed data parallel (ddp).
+    """Pre-train the population backbone, on one GPU or with DDP.
 
-    To run on a single GPU, example:
-    $ cocofl_train [args...]
+    One GPU::
 
-    To run with DDP on 4 gpus on 1 node, example:
+        cocofl_train [args...]
 
-    $ torchrun --standalone --nproc_per_node=4 cocofl_train [args...]
+    DDP on 4 GPUs on one node::
 
-    To run with DDP on 4 gpus across 2 nodes, example:
+        torchrun --standalone --nproc_per_node=4 cocofl_train [args...]
 
-    - Run on the first (master) node with example IP 123.456.123.456:
+    DDP across 2 nodes (run on each node, with node_rank 0 on the master)::
 
-    $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456
-     --master_port=1234 cocofl_train [args...]
+        torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \\
+            --master_addr=<master ip> --master_port=1234 cocofl_train [args...]
 
-    - Run on the worker node:
-
-    $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456
-     --master_port=1234 cocofl_train [args...]
-
-    (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
+    Without an Infiniband interconnect, prepend NCCL_IB_DISABLE=1.
     """
     device = cfg.device
     out_dir = Path(cfg.out_dir)
-    # various inits, derived attributes, I/O setup
+    # Setup: DDP, device and output folder
     ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
     if ddp:
         init_process_group(backend=cfg.backend)
@@ -56,12 +49,12 @@ def main(cfg: DictConfig):
         th.cuda.set_device(device)
         master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
         seed_offset = ddp_rank  # each process gets a different seed
-        # world_size number of processes will be training simultaneously, so we can scale
-        # down the desired gradient accumulation iterations per process proportionally
+        # Several processes train at once, so split the gradient accumulation steps
+        # between them.
         assert cfg.gradient_accumulation_steps % ddp_world_size == 0
         cfg.gradient_accumulation_steps //= ddp_world_size
     else:
-        # if not ddp, we are running on a single gpu, and one process
+        # Not DDP: one process on one GPU.
         master_process = True
         seed_offset = 0
 
@@ -70,9 +63,9 @@ def main(cfg: DictConfig):
     if master_process:
         logger.info(f"Tokens per iteration per worker: {tokens_per_iter:,}")
         out_dir.mkdir(parents=True, exist_ok=True)
-        # The resolved config beside the checkpoint it produced. Which
-        # `num_epochs` and `n_train_windows` a backbone was trained with is not
-        # recoverable from the .pt, and both change the model substantially.
+        # Save the resolved config next to the checkpoint. num_epochs and
+        # n_train_windows change the model a lot and cannot be read back from the
+        # .pt.
         dump_config(cfg, out_dir / "config.yaml")
     ctx = setup_torch(device, cfg.dtype, 42 + seed_offset)
 
@@ -81,11 +74,10 @@ def main(cfg: DictConfig):
 
     vocab_size = math.ceil(len(vocab) / 64) * 64
 
-    # WP2 task 3: restrict population pre-training to the EXCLUSIVE 40%
-    # population reserve. When ``population_reserve_path`` is set, keep only
-    # windows whose patient_id is in that reserve, then split those into
-    # train/val. This guarantees the backbone never sees a centre's patients
-    # or the global held-out test set.
+    # WP2 task 3: pre-train only on the 40 % population reserve. With
+    # population_reserve_path set, keep only windows of reserve patients and split
+    # those into train/val, so the backbone never sees a centre's patients or the
+    # global test set.
     reserve_path = cfg.get("population_reserve_path", None)
     if reserve_path:
         import json
@@ -93,10 +85,9 @@ def main(cfg: DictConfig):
                    json.loads(Path(reserve_path).read_text())["patient_ids"]}
         full_ds = train_dataset
         n_windows = len(full_ds)
-        # Build the per-window patient-id array vectorised. ``patient_id_at_idx``
-        # is a lazy sharded accessor (scalar indexing only), so instead we use
-        # the fact that token positions [offset_i, offset_{i+1}) all belong to
-        # patient i: repeat each patient id over its token span.
+        # Per-window patient ids, vectorised. patient_id_at_idx only supports scalar
+        # indexing, so use the fact that token positions [offset_i, offset_{i+1})
+        # belong to patient i and repeat each id over its span.
         pids_per_patient = full_ds.patient_ids
         offsets = full_ds.patient_offsets
         total_tokens = len(full_ds.tokens)
@@ -113,8 +104,7 @@ def main(cfg: DictConfig):
         perm = th.randperm(keep.numel(), generator=th.Generator().manual_seed(42))
         keep = keep[perm]
         n_val = max(1, int(keep.numel() * cfg.val_size))
-        # Keep indices as tensors (matches train_test_split's th.arange pattern)
-        # to avoid materialising a ~100M-element Python list.
+        # Keep indices as tensors to avoid building a ~100M-element Python list.
         val_dataset = Subset(full_ds, keep[:n_val])
         train_dataset = Subset(full_ds, keep[n_val:])
         if master_process:
@@ -126,15 +116,15 @@ def main(cfg: DictConfig):
     else:
         train_dataset, val_dataset = train_dataset.train_test_split(cfg.val_size)
 
-    # TimelineDataset returns one sample PER TOKEN OFFSET (sliding window),
-    # so naive len() is ~total_tokens. For TFN-style epochs we instead iterate
-    # over non-overlapping windows of size n_positions.
+    # TimelineDataset has one sample per token offset (sliding window), so len() is
+    # about the number of tokens. An epoch here instead walks non-overlapping
+    # windows of n_positions tokens.
     epoch_stride = cfg.get("epoch_stride", None) or cfg.n_positions
     if epoch_stride > 1:
         train_dataset = Subset(train_dataset, list(range(0, len(train_dataset), epoch_stride)))
         val_dataset = Subset(val_dataset, list(range(0, len(val_dataset), epoch_stride)))
 
-    # Optional cap on number of training windows (TFN-style: ~10K patients ~= a few thousand windows)
+    # Optional cap on the number of training windows (0 or None = no cap)
     n_train_windows = cfg.get("n_train_windows", None)
     if n_train_windows and n_train_windows > 0 and len(train_dataset) > n_train_windows:
         import random as _random
@@ -156,7 +146,7 @@ def main(cfg: DictConfig):
         )
         for dataset in [train_dataset, val_dataset]
     )
-    # A proper epoch loop, matching the TFN training notebook style.
+    # Epoch loop, as in the TFN training notebook.
 
     num_epochs = cfg.get("num_epochs", None)
     if num_epochs is None or num_epochs <= 0:
@@ -213,9 +203,9 @@ def main(cfg: DictConfig):
     logger.info(f"Model parameters: {raw_model.num_parameters() / 1e6:.2f}M")
 
     raw_model.to(device)
-    # initialize a GradScaler. If enabled=False scaler is a no-op
+    # GradScaler; a no-op unless dtype is float16
     scaler = th.amp.GradScaler(enabled=(cfg.dtype == "float16"))
-    # optimizer
+    # Optimiser
     optimizer = configure_optimizers(
         raw_model, cfg.weight_decay, cfg.lr, (cfg.beta1, cfg.beta2), device
     )
@@ -231,7 +221,7 @@ def main(cfg: DictConfig):
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
 
-    # logging
+    # Logging
     online_logger, wandb_run = None, None
     if cfg.wandb_log and master_process:
         import wandb
@@ -257,7 +247,7 @@ def main(cfg: DictConfig):
         )
         online_logger = wandb
 
-    # ---- TFN-style epoch-based training loop ----
+    # Epoch-based training loop
     iter_num = 0
     local_iter_num = 0
     t0 = time.time()
@@ -272,7 +262,8 @@ def main(cfg: DictConfig):
         for batch_idx, (X_cpu, Y_cpu) in enumerate(train_dataloader):
             X, Y = _to_device(X_cpu, Y_cpu)
 
-            # Learning rate schedule (TFN uses constant lr, so allow disabling)
+            # Learning-rate schedule (TFN uses a constant lr, so it can be turned
+            # off)
             if cfg.get("use_lr_schedule", True):
                 lr = get_lr(iter_num, cfg)
             else:
@@ -280,7 +271,7 @@ def main(cfg: DictConfig):
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
 
-            # forward-backward (with optional gradient accumulation)
+            # Forward and backward, with optional gradient accumulation
             for micro_step in range(cfg.gradient_accumulation_steps):
                 if ddp:
                     model.require_backward_grad_sync = (
@@ -315,7 +306,7 @@ def main(cfg: DictConfig):
             iter_num += 1
             local_iter_num += 1
 
-        # End-of-epoch: evaluate + checkpoint (TFN style)
+        # End of epoch: evaluate and save a checkpoint
         th.cuda.empty_cache()
         losses = estimate_loss(
             model,

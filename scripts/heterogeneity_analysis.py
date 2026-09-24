@@ -1,38 +1,24 @@
-"""Is there enough centre-specific signal to justify partitioning the training data?
+"""Are the centres different enough to be worth splitting the training data for?
 
-WHY THIS EXISTS
----------------
-The characterisation so far measures ONE kind of heterogeneity: label shift, i.e.
-per-centre differences in P(Y). That is the least demanding kind, and it is not the
-kind personalisation needs.
+Personalisation only pays if the decision function differs between centres.
+Splitting the data three ways has a cost (each cohort adapter learns from a third of
+the data, so its variance rises), and that cost is repaid only if there is
+centre-specific structure to learn. This script measures the three kinds of shift
+and prices the variance::
 
-Personalisation pays only if the *decision function* differs by centre. Partitioning
-the training signal three ways is a real cost — each cohort adapter is estimated
-from a third of the data, so its variance rises — and that cost is only recovered
-if per-centre structure exists to be learned. The question is therefore not "are
-the centres different?" but "are they different in a way that exceeds the variance
-penalty of splitting the data to exploit it?"
+    P(X)    covariate shift   do centres occupy different regions of score space?
+    P(Y|X)  concept shift     does the mapping from score to risk differ?
+    P(Y)    label shift       do base rates differ?
 
-This script decomposes the question into the three shifts, and prices the variance.
+Concept shift is the one that matters. If P(Y|X) is shared, no per-centre adapter
+can beat a shared model, however different P(X) or P(Y) are: pooling estimates the
+same law from three times the data.
 
-  P(X)   COVARIATE shift    do centres occupy different regions of score space?
-  P(Y|X) CONCEPT shift      does the optimal mapping from score to risk differ?
-  P(Y)   LABEL shift        do base rates differ?               (already measured)
+It works in the population model's score space. The cohort adapter feeds a frozen
+head, so what it can express comes down to reshaping that score. It uses only saved
+predictions: no GPU, no retraining.
 
-CONCEPT SHIFT IS THE DECISIVE ONE. If P(Y|X) is common across centres, then no
-per-centre adapter can beat a shared model regardless of how different P(X) or
-P(Y) are — the centres are drawing from one conditional law and pooling is
-strictly better, because pooling estimates that law from three times the data.
-
-Working in the population model's SCORE space is the right resolution for this
-question, not a limitation. The cohort adapter is a residual MLP on the final
-hidden state feeding a frozen head, so everything it can express reduces to a
-monotone-or-not reshaping of that score. If P(Y | score) is common across centres,
-the adapter has nothing to condition on — which is a statement about the
-architecture's capacity meeting the data's structure, exactly the framing the
-supervisor asked for.
-
-Uses only saved predictions: no GPU, no retraining.
+::
 
     python scripts/heterogeneity_analysis.py <cell_dir> [<cell_dir> ...]
 """
@@ -58,12 +44,12 @@ def _logit(p: np.ndarray) -> np.ndarray:
 
 
 def _platt(scores: np.ndarray, y: np.ndarray, iters: int = 200) -> tuple[float, float]:
-    """Fit y ~ sigmoid(a * logit(score) + b) by Newton steps on (a, b).
+    """Fit ``y ~ sigmoid(a * logit(score) + b)`` with Newton steps on (a, b).
 
-    The pair (a, b) IS the centre's decision function in score space: `b` is its
-    prior/threshold and `a` how sharply score maps to risk. Comparing (a, b) across
-    centres is therefore a direct test for concept shift, and it is exactly the
-    correction a per-centre model could apply for free.
+    (a, b) is the centre's decision function in score space: ``b`` is its baseline
+    risk and ``a`` how sharply score maps to risk. Comparing (a, b) across centres
+    tests for concept shift, and it is the correction a per-centre model could make
+    for free.
     """
     x = _logit(scores)
     a, b = 1.0, 0.0
@@ -88,7 +74,7 @@ def _platt(scores: np.ndarray, y: np.ndarray, iters: int = 200) -> tuple[float, 
 
 
 def _auroc_se(auc: float, n_pos: int, n_neg: int) -> float:
-    """Hanley-McNeil standard error — the price of estimating from fewer samples."""
+    """Hanley-McNeil standard error: the cost of estimating from fewer samples."""
     if n_pos < 1 or n_neg < 1:
         return float("nan")
     q1 = auc / (2.0 - auc)
@@ -115,7 +101,7 @@ def analyse(cell: str) -> None:
     hosps = sorted(per)
     print(f"\n{'=' * 78}\n{os.path.basename(cell)}\n{'=' * 78}")
 
-    # --- P(Y): label shift, and the variance price of partitioning -----------
+    # P(Y): label shift, and the variance cost of splitting the data
     print("  P(Y) label shift, and the estimation cost of splitting the signal")
     print(f"    {'centre':<10}{'n':>9}{'pos':>8}{'prev':>9}{'AUROC':>9}{'SE':>9}")
     tot_p, tot_n, aucs = 0, 0, []
@@ -140,7 +126,7 @@ def analyse(cell: str) -> None:
     print(f"    variance price of partitioning: mean per-centre SE {mean_se:.4f} "
           f"vs pooled {pooled_se:.4f}  ->  {mean_se / pooled_se:.2f}x")
 
-    # --- P(X): covariate shift in score space -------------------------------
+    # P(X): covariate shift in score space
     print("\n  P(X) covariate shift: KS distance between centres' score distributions")
     ks_vals = []
     for i, hi in enumerate(hosps):
@@ -149,7 +135,7 @@ def analyse(cell: str) -> None:
             ks_vals.append(d)
             print(f"    h{hi} vs h{hj}: KS = {d:.4f}")
 
-    # --- P(Y|X): concept shift, the decisive quantity ------------------------
+    # P(Y|X): concept shift, the one that matters
     print("\n  P(Y|X) CONCEPT shift: per-centre decision function in score space")
     print("    y ~ sigmoid(a * logit(score) + b);  a=1, b=0 would be 'shared model")
     print("    is already optimal for this centre'")
@@ -170,8 +156,8 @@ def analyse(cell: str) -> None:
         b_sp = max(b for _, b in coefs.values()) - min(b for _, b in coefs.values())
         print(f"\n    spread across centres: slope {a_sp:.4f}, intercept {b_sp:.4f}")
 
-        # What does a per-centre decision function BUY, out of fold? If concept
-        # shift is real, applying each centre's own (a, b) beats the pooled one.
+        # What is a per-centre decision function worth out of fold? With real
+        # concept shift, each centre's own (a, b) beats the pooled one.
         rng = np.random.default_rng(0)
         gain_own, gain_pooled = [], []
         for h in hosps:

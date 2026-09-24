@@ -1,7 +1,7 @@
-"""WP5 metrics: personalisation gain, retention, BWT, FWT.
+"""WP5 metrics: personalisation gain, retention, BWT, FWT, communication cost.
 
-All AUC inputs may be ``None`` (eval set produced only one class, etc.) — the
-metric helpers return ``None`` in that case rather than raising.
+AUROC inputs may be ``None`` (e.g. a single-class eval set); the helpers then return
+``None`` instead of raising.
 """
 from __future__ import annotations
 
@@ -42,28 +42,18 @@ def delta_patient(rec: AucPerLevel) -> float | None:
 
 
 def retention(after: float | None, before: float | None) -> float | None:
-    """Fraction of the pre-adaptation performance that survives:
-    ``retention = after / before``. ``=1.0`` means perfect preservation."""
+    """Share of the starting performance that remains: ``after / before`` (1.0 = fully kept)."""
     return _safe_div(after, before)
 
 
 def bwt(round_aucs: list[float | None]) -> float | None:
-    """Backward Transfer: mean AUC change between the FIRST measurement
-    (after the model was first adapted) and the LAST measurement (after all
-    subsequent adaptation rounds).
+    """Backward transfer: mean AUROC change from the first round to the last.
 
-    BWT > 0 : continual adaptation IMPROVED early-task performance
-    BWT = 0 : neutral
-    BWT < 0 : catastrophic forgetting
+    BWT > 0: later rounds improved on the first adapted model; BWT < 0: forgetting.
 
-    SCOPE, because the TD's wording differs. The TD asks for "performance change
-    on past TASKS after adaptation". A WP5 cell trains one task, so there are no
-    past tasks to revisit — this measures drift on the SAME task's trajectory set
-    between the first and last round. That is the closest available reading, and
-    it is what the reported BWT means; it is not cross-task backward transfer and
-    must not be described as such.
-
-    Skips None entries.
+    The TD asks for performance change on past tasks, but one WP5 cell trains one
+    task, so this measures drift on the same task between the first and last round.
+    It is not cross-task backward transfer. None entries are skipped.
     """
     vals = [v for v in round_aucs if v is not None]
     if len(vals) < 2:
@@ -72,14 +62,12 @@ def bwt(round_aucs: list[float | None]) -> float | None:
 
 
 def fwt(rec: AucPerLevel, baseline_population: float | None) -> float | None:
-    """Forward Transfer: how much the *cohort/patient* adapted model
-    helps on a held-out patient population (compared to the un-adapted
-    population baseline).
+    """Same-centre transfer: ``cohort_auc - population_baseline_auc``.
 
-    Approximation here: ``cohort_auc - population_baseline_auc``. A more
-    rigorous FWT would evaluate on a brand-new task or patient unseen during
-    cohort training; for our setting (per-task BCE) we use the population
-    baseline as the reference.
+    Kept for comparison only (``fwt_hier_samecentre``). Scored on the centre's own
+    data it is just Delta_cohort rescaled. The reported forward transfer
+    (``fwt_hier_global``) scores each cohort model on a reference set pooled from
+    all centres; see ``run_evaluation``.
     """
     if rec.cohort is None or baseline_population is None:
         return None
@@ -107,18 +95,18 @@ def auroc_ci95_halfwidth(auc: float | None, n: int | None, n_pos: int | None
                           ) -> float | None:
     """Half-width of the 95 % CI for an AUROC (Hanley & McNeil, 1982).
 
+    ::
+
         SE = sqrt( [A(1-A) + (n_p-1)(Q1-A²) + (n_n-1)(Q2-A²)] / (n_p·n_n) )
         Q1 = A/(2-A),  Q2 = 2A²/(1+A)
 
-    Reported alongside every AUROC so the eval-set size is visible in the
-    numbers themselves. It is what makes the small-sample regime concrete: at
-    n=150 and ~2 % prevalence (≈3 positives) this returns ≈0.34, which is the
-    same order as the entire spread between methods — i.e. per-hospital
-    mortality AUROCs at that size carry almost no information on their own.
+    Reported next to every AUROC so its precision is visible. At 150 windows and ~2
+    % prevalence (about 3 positives) it is about 0.34, larger than the whole spread
+    between methods.
 
-    Note this is the CI for a *single* AUROC. Method-to-method comparisons in
-    this harness are paired (identical eval windows), so their differences are
-    estimated more precisely than these independent intervals suggest.
+    This is the interval for a single AUROC. Method comparisons here are paired
+    (same windows), so their differences are more precise than these intervals
+    suggest.
     """
     if auc is None or not n_pos or not n:
         return None
@@ -144,12 +132,10 @@ def communication_bytes(state: dict, dtype_bytes: int = 4) -> int:
 
 
 def parameters_updated(state: dict | None) -> int | None:
-    """Number of parameters transmitted for one level's update.
+    """Number of parameters sent for one level's update.
 
-    Spec WP5 axis 6 asks for the "number of parameters updated per
-    synchronisation round (per level)" and for total communication cost "in
-    equivalent parameter counts" — the harness reported bytes only, which is the
-    same information but not the unit the TD asks for.
+    WP5 axis 6 asks for parameters updated per synchronisation round, per level, and
+    for total cost in parameter counts, not only bytes.
     """
     if state is None:
         return None
@@ -157,36 +143,36 @@ def parameters_updated(state: dict | None) -> int | None:
 
 
 def naive_full_model_parameters(model) -> int:
-    """Parameter count of the FULL model — the naïve-federation reference."""
+    """Parameter count of the full model, the reference for naive federation."""
     return sum(int(p.numel()) for p in model.parameters())
 
 
 def naive_full_model_bytes(model, dtype_bytes: int = 4) -> int:
-    """Bytes to transmit the FULL model state (backbone + classifier head).
+    """Bytes to send the full model state (backbone + classifier head).
 
-    This is the cost of *naïve* federated learning where each centre sends
-    the entire model state every round (no adapters, no parameter-efficient
-    methods). Used as the comparison baseline for Spec WP5 axis 6.
+    The cost of naive federated learning, where every centre sends the whole model
+    every round. The comparison point for WP5 axis 6.
     """
     return sum(int(p.numel()) for p in model.parameters()) * dtype_bytes
 
 
 def total_communication_cost(per_round_bytes: int, num_hospitals: int,
                               num_rounds: int) -> int:
-    """Round-trip cost over the full training run.
+    """Total transfer cost over the whole run.
 
-    Each round: ``num_hospitals`` uploads + 1 server broadcast = ``num_hospitals + 1``
-    transfers of size ``per_round_bytes``. ``num_rounds`` rounds total.
+    Each round has ``num_hospitals`` uploads plus one broadcast, i.e.
+    ``num_hospitals + 1`` transfers of ``per_round_bytes``, over ``num_rounds``
+    rounds.
     """
     return per_round_bytes * (num_hospitals + 1) * num_rounds
 
 
 def comm_savings_ratio(method_bytes_per_round: int, naive_bytes_per_round: int
                         ) -> float | None:
-    """Compression factor: how many times *cheaper* the method is than naïve FL.
+    """How many times cheaper the method is than naive FL per round.
 
-    A value of 10 means the method transmits 10× less per round.
-    Returns ``None`` when ``method_bytes_per_round`` is zero.
+    10 means ten times less data per round. ``None`` when ``method_bytes_per_round``
+    is zero.
     """
     if method_bytes_per_round <= 0:
         return None

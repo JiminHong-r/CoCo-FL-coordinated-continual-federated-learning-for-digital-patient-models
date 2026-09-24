@@ -1,20 +1,10 @@
 """Runs must be reproducible, and replicates must still be possible.
 
-Torch's global RNG was never seeded in the evaluation entry point, so no WP5 cell
-could be reproduced: each run drew a different adapter down-projection init, and
-because the validation surface is flat enough that round selection is decided by
-noise, that alone changed the selected round between identical configurations.
-
-The fix has to keep BOTH properties:
-
-* fixing the config fixes the result (reproducibility), and
-* run-to-run variance can still be measured (replication),
-
-which is why there are two seeds. ``seed`` fixes the data — Dirichlet partition,
-balanced sampling, loader order. ``run_seed`` fixes training randomness only.
-Collapsing them into one knob would make a "seed repeat" silently redraw the
-partition, confounding training noise with a different split of patients into
-centres.
+Two seeds keep both properties. ``seed`` fixes the data (Dirichlet partition,
+balanced sampling, loader order). ``run_seed`` fixes only training randomness
+(adapter initialisation). With a single seed, a "repeat with another seed" would
+also redraw which patients belong to which centre. Before seeding, identical
+configurations could select different rounds purely from the adapter initialisation.
 """
 from __future__ import annotations
 
@@ -26,7 +16,7 @@ from cocofl.adapters.ffn import FFNAdapter
 
 
 def _init_draw(run_seed: int) -> torch.Tensor:
-    """The adapter init that torch's global RNG produces under a given seed."""
+    """The adapter initialisation torch's global RNG produces under a given seed."""
     torch.manual_seed(run_seed)
     return FFNAdapter(16, bottleneck=4).down.weight.detach().clone()
 
@@ -43,15 +33,13 @@ def test_different_run_seed_changes_it():
 
 
 def test_the_down_projection_is_what_carries_the_randomness():
-    """The up-projection is zeroed for identity-at-init, so if the down
-    projection were also deterministic the adapter would have no seed
-    sensitivity at all and this whole knob would be inert."""
+    """The up-projection starts at zero, so the down-projection is where the randomness is; if it were fixed, the seed would change nothing."""
     a = FFNAdapter(16, bottleneck=4)
     assert torch.count_nonzero(a.up.weight) == 0
     assert torch.count_nonzero(a.down.weight) > 0
 
 
-# --- the entry point actually seeds, and reads both knobs -----------------
+# The entry point seeds, and reads both settings
 
 def test_run_evaluation_seeds_the_global_torch_rng():
     from cocofl.evaluation import run_evaluation
@@ -64,7 +52,7 @@ def test_run_evaluation_seeds_the_global_torch_rng():
 
 
 def test_run_seed_is_recorded_in_the_results_row():
-    """A replicate is only interpretable if the row says which run it was."""
+    """A replicate only makes sense if its row says which run it was."""
     from cocofl.evaluation import run_evaluation
 
     assert '"cfg_run_seed"' in inspect.getsource(run_evaluation)

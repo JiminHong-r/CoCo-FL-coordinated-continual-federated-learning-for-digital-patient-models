@@ -1,15 +1,9 @@
 """A results row must never contradict the model it describes.
 
-The bias-only arm reported ``hierarchical`` at ``selected_round=0`` alongside
-``|Δ| = 7.13`` — "no adaptation happened" printed next to "the weights moved a
-lot". Both came from the same defect: two call sites swapped in the per-centre
-states without updating the numbers reported beside them.
-
-The val AUROC was the damaging half. Under per-centre selection the installed
-ensemble is each centre's own best round, so its macro is ``mean(per_hosp_best)``
-and is >= the best global macro by construction. Reporting the global figure
-UNDERSTATES the model actually being tested, and validation AUROC is the exact
-quantity the "does adaptation beat population_only?" comparison rests on.
+Under per-centre selection each centre keeps its own best round. The reported
+validation AUROC must then be the mean of those per-centre bests (which is at least
+the best global round's), and ``selected_round`` must be None, not 0; an old bug
+reported round 0 next to weights that had moved a lot.
 """
 from __future__ import annotations
 
@@ -33,7 +27,7 @@ def _resolve(on: bool, per_hosp_best=None, global_val=0.80):
     )
 
 
-# --- off: nothing changes -------------------------------------------------
+# Off: nothing changes
 
 def test_global_selection_is_passed_through_untouched():
     s = _resolve(on=False)
@@ -43,7 +37,7 @@ def test_global_selection_is_passed_through_untouched():
     assert s.per_hospital_round is None
 
 
-# --- on: states, val and round must all agree ------------------------------
+# On: states, validation score and round must all agree
 
 def test_per_centre_selection_installs_the_per_centre_states():
     assert _resolve(on=True).states is P_STATES
@@ -52,8 +46,8 @@ def test_per_centre_selection_installs_the_per_centre_states():
 def test_val_auroc_describes_the_installed_ensemble_not_the_global_choice():
     s = _resolve(on=True)
     assert s.val_auroc == pytest.approx(0.80)          # mean(0.90, 0.70)
-    # The point of the test: it is recomputed, not inherited. Make the global
-    # figure distinct so equality cannot pass by coincidence.
+    # The value must be recomputed, not copied; make the global figure different so
+    # the test cannot pass by coincidence.
     s2 = _resolve(on=True, global_val=0.55)
     assert s2.val_auroc == pytest.approx(0.80), (
         "val_auroc was inherited from the global choice — it must describe the "
@@ -62,9 +56,7 @@ def test_val_auroc_describes_the_installed_ensemble_not_the_global_choice():
 
 
 def test_per_centre_val_is_never_below_the_global_choice():
-    """Selecting per centre maximises over rounds independently, so its macro
-    dominates the best single global round. A violation means the two are being
-    computed from different things."""
+    """Per-centre selection maximises each centre separately, so its macro is never below the best global round."""
     s = _resolve(on=True, per_hosp_best={0: 0.91, 1: 0.85}, global_val=0.87)
     assert s.val_auroc >= 0.87
 
@@ -97,7 +89,7 @@ def test_all_none_val_does_not_raise():
     assert s.val_auroc is None
 
 
-# --- the CSV formatter ----------------------------------------------------
+# The CSV formatter
 
 def test_per_hospital_round_column_formatting():
     from cocofl.evaluation.run_evaluation import _fmt_per_hosp_round
@@ -119,11 +111,10 @@ def test_per_hospital_round_column_is_blank_under_global_selection(extra):
     assert _fmt_per_hosp_round(_R()) is None
 
 
-# --- one implementation, not two -----------------------------------------
+# One implementation, not two
 
 def test_neither_runner_reinstalls_per_centre_states_by_hand():
-    """Both call sites must go through resolve_selection. An inline
-    ``best_states = per_hosp_state`` is how the two copies drifted apart."""
+    """Both call sites must go through resolve_selection instead of swapping in per-centre states by hand."""
     import inspect
 
     from cocofl.evaluation import baselines, run_evaluation

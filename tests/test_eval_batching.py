@@ -1,10 +1,8 @@
-"""Length-bucketed eval batching must not change a single prediction.
+"""Length-bucketed batching must not change a single prediction.
 
-The WP4/WP5 harness ran evaluation at batch_size=1, which capped every
-hospital's eval set at 150 windows for cost reasons. Batching is what lifts
-that cap — but only if it is provably prediction-preserving, because the
-downstream sequences are variable-length and the backbone is a recurrence that
-would consume any padding we introduced.
+Windows have different lengths and the backbone is a recurrence that would run
+through any padding, so batching is only safe if it provably leaves every prediction
+unchanged.
 """
 from __future__ import annotations
 
@@ -23,11 +21,10 @@ TIMELINE_SIZE = 16
 
 
 class FakeInferenceDataset:
-    """Mimics ``InferenceDataset`` + a task dataset's index layout.
+    """Mimics the index layout of ``InferenceDataset`` plus a task dataset.
 
-    Two patients with interleaved token ranges; window length is clipped both
-    by the patient's own history start and by ``timeline_size``, which is what
-    makes real downstream windows variable-length.
+    Two patients with separate token ranges. Window length is clipped by the
+    patient's own history start and by ``timeline_size``, as in the real data.
     """
 
     def __init__(self):
@@ -81,11 +78,10 @@ def label_fn(y):
 
 
 class DecayRecurrence(torch.nn.Module):
-    """h_t = 0.5*h_{t-1} + x_t, scored at the last timestep.
+    """h_t = 0.5 * h_{t-1} + x_t, read at the last step.
 
-    Deliberately order- and length-sensitive: a left-pad would leak into the
-    state before the real tokens start and shift the output, so this test fails
-    loudly if batching ever introduces padding.
+    Sensitive to order and length on purpose: any padding would enter the state and
+    change the output, so the test fails if batching ever pads.
     """
 
     def forward(self, input_ids, elapsed_times=None,
@@ -107,20 +103,18 @@ def test_sequence_lengths_match_getitem():
 
 
 def test_lengths_are_genuinely_variable():
-    """Guards the test itself: a fixture where every window is the same length
-    would make the batching test vacuous."""
+    """Guard for the fixture: if every window had the same length, the batching test would prove nothing."""
     ds = FakeInferenceDataset()
     lengths = sequence_lengths(ds, range(len(ds)))
     assert len(set(lengths.tolist())) > 1
 
 
 class LazyLookup:
-    """Stands in for the sharded backend's ``LookupData``.
+    """Stands in for the sharded backend's lazy ``LookupData``.
 
-    Not an array: every access costs a search, and there is no cheap way to
-    materialise the whole thing. Counts accesses and rejects the full walk, so a
-    regression back to coercing the entire object is a test failure rather than
-    an hour of silent stalling on the real tree.
+    Every access costs a search. It counts accesses and refuses a full walk, so
+    turning the whole object into a tensor (about an hour on real data) fails the
+    test.
     """
 
     def __init__(self, values):

@@ -1,23 +1,16 @@
-"""Paired bootstrap on method differences — the correct instrument for "is this a tie?".
+"""Paired bootstrap on method differences.
 
-WHY THIS EXISTS
----------------
-Every WP5 method is scored on IDENTICAL evaluation windows. Their differences are
-therefore PAIRED, and a paired difference is estimated far more precisely than the
-independent per-method confidence intervals suggest.
+Every WP5 method is scored on the same evaluation windows, so the difference between
+two methods is paired and much more precise than their separate confidence intervals
+suggest. On class-aware readmission alpha=0.5 the separate Hanley-McNeil half-width
+is about +/-0.016 while method differences are about 0.0006, so separate intervals
+could never resolve anything. Resampling the same windows for both methods cancels
+the shared per-window difficulty and gives an interval on the difference itself.
 
-The numbers make the point. On class-aware readmission α=0.5 the independent
-Hanley-McNeil half-width is about ±0.016, while the observed method differences
-are ~0.0006 — a 25× mismatch. Reported that way, every comparison is "inside the
-CI" and nothing can ever be resolved, which is not a finding about the methods but
-about using the wrong instrument. Resampling the SAME windows for both methods
-cancels the shared window-difficulty variance and leaves the interval on the
-difference itself.
+::
 
-This is the difference between reporting a tie and demonstrating one.
-
-  python scripts/paired_bootstrap.py results_v9_classaware_readmission_a0.5
-  python scripts/paired_bootstrap.py <cell_dir> --ref population_only --n 10000
+    python scripts/paired_bootstrap.py results_v11full_classaware_readmission_a0.5
+    python scripts/paired_bootstrap.py <cell_dir> --ref population_only --n 10000
 """
 from __future__ import annotations
 
@@ -54,26 +47,13 @@ def load(cell_dir: str):
 
 
 def reportable(per_hosp: dict, min_pos: int, min_neg: int) -> tuple[list, list]:
-    """Split hospitals into (kept, excluded) by the harness's evidence floor.
+    """Split hospitals into (kept, excluded) using the harness's evidence floor.
 
-    WHY THIS MUST MATCH run_evaluation.py
-    -------------------------------------
-    The CSV's MACRO columns are computed over ``_reportable_hospitals`` — centres
-    with at least ``min_pos`` positives and ``min_neg`` negatives. This script
-    originally averaged over ALL centres, so the two headline numbers for the same
-    cell disagreed, and the disagreement DILUTED a real effect rather than
-    inventing one.
-
-    On class-aware mortality α=0.1, h2 has 527 windows and 8 positives, and the
-    harness excludes it. Over the floored set ``top_down_only`` is +0.00317 with a
-    95 % CI of [+0.00061, +0.00634] — it excludes zero. Averaging h2 back in drags
-    the same comparison to +0.00043 with a CI spanning zero, because an AUROC
-    estimated from eight positives is nearly pure noise and it carries a third of
-    the macro weight. The unfloored version turns a demonstrated win into an
-    apparent tie.
-
-    Two aggregates over the same cell must be over the same centres, or one of
-    them is wrong.
+    The CSV's MACRO columns only include centres with at least ``min_pos`` positives
+    and ``min_neg`` negatives, so this script must use the same rule; two summaries
+    of one cell must cover the same centres. Including a centre with, say, 8
+    positives adds mostly noise with a third of the macro weight and can turn a real
+    difference into an apparent tie.
     """
     kept, dropped = [], []
     for h, (_p, y) in per_hosp.items():
@@ -85,11 +65,11 @@ def reportable(per_hosp: dict, min_pos: int, min_neg: int) -> tuple[list, list]:
 
 
 def _ece(p: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
-    """Expected Calibration Error over equal-width bins.
+    """Expected calibration error over equal-width bins.
 
-    Mirrors cocofl.evaluation.metrics.expected_calibration_error so the paired
-    intervals describe the same quantity the CSV reports. LOWER is better, so a
-    NEGATIVE delta in the table below is an improvement.
+    Same as cocofl.evaluation.metrics.expected_calibration_error, so the intervals
+    describe what the CSV reports. Lower is better, so a negative delta is an
+    improvement.
     """
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     n, ece = len(p), 0.0
@@ -104,21 +84,19 @@ def _ece(p: np.ndarray, y: np.ndarray, n_bins: int = 10) -> float:
 
 def macro_metric(per_hosp: dict, idx: dict | None = None,
                  metric: str = "auroc") -> float | None:
-    """Macro AUROC or AUPRC, optionally on a resample given per hospital.
+    """Macro AUROC or AUPRC, optionally on a per-hospital resample.
 
-    AUPRC matters here because it and AUROC have disagreed on every apparent win
-    so far: at ~2 % prevalence a method can improve global ranking (AUROC) while
-    ranking worse among the high-scoring cases that AUPRC weights. Testing only
-    AUROC would report the half of the picture that happens to look better.
+    AUPRC is tested too because at ~2 % prevalence a method can improve overall
+    ranking (AUROC) while ranking the high-scoring cases worse (what AUPRC weights),
+    and the two have disagreed on every apparent win so far.
     """
     vals = []
     for h, (p, y) in per_hosp.items():
         if idx is not None:
             p, y = p[idx[h]], y[idx[h]]
         if metric == "ece":
-            # ECE needs no second class to be defined, but a single-class slice
-            # makes it trivially the mean confidence gap; keep the same guard as
-            # the rank metrics so all three describe identical centres.
+            # ECE is defined for one class, but use the same guard as the rank
+            # metrics so all three cover the same centres.
             if len(np.unique(y)) < 2:
                 continue
             vals.append(_ece(p, y))
@@ -136,8 +114,8 @@ def main() -> None:
     ap.add_argument("--ref", default="population_only")
     ap.add_argument("--n", type=int, default=2000, help="bootstrap resamples")
     ap.add_argument("--seed", type=int, default=42)
-    # Defaults mirror the harness's min_eval_pos / min_eval_neg so this script and
-    # the CSV MACRO describe the same set of centres.
+    # Defaults match the harness's min_eval_pos / min_eval_neg, so this and the CSV
+    # MACRO cover the same centres.
     ap.add_argument("--min-pos", type=int, default=10)
     ap.add_argument("--min-neg", type=int, default=10)
     ap.add_argument("--no-floor", action="store_true",
@@ -168,8 +146,8 @@ def main() -> None:
     n_by_h = {h: len(data[args.ref][h][0]) for h in hosps}
     print(f"  windows: {n_by_h}   resamples: {args.n}")
 
-    # Sanity: a paired test is only valid if every method saw the same windows in
-    # the same order. Identical lengths AND identical labels is the check.
+    # A paired test needs every method to have seen the same windows in the same
+    # order: check that lengths and labels are identical.
     for m in data:
         for h in hosps:
             if h not in data[m]:
@@ -183,8 +161,7 @@ def main() -> None:
     metrics = (["auroc", "auprc", "ece"] if args.metric == "all"
                else [args.metric])
     for metric in metrics:
-        # Same seed per metric so both are read off the SAME resamples — the
-        # AUROC/AUPRC comparison is then itself paired, not two separate draws.
+        # Same seed for each metric, so AUROC and AUPRC use the same resamples.
         rng = np.random.default_rng(args.seed)
         base = {m: macro_metric(data[m], metric=metric) for m in data}
         print(f"\n  {'method':<18}{'macro ' + metric.upper():>12}{'Δ vs ref':>11}"
@@ -197,8 +174,8 @@ def main() -> None:
                 continue
             diffs = np.empty(args.n)
             for b in range(args.n):
-                # ONE resample of window indices, applied to BOTH methods — this
-                # is what cancels the shared per-window difficulty.
+                # One resample of window indices, used for both methods; this is
+                # what cancels the shared per-window difficulty.
                 idx = {h: rng.integers(0, n_by_h[h], n_by_h[h]) for h in hosps}
                 a = macro_metric(data[m], idx, metric)
                 r = macro_metric(data[args.ref], idx, metric)

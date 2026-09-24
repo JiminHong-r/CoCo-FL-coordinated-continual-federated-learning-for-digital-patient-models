@@ -1,25 +1,19 @@
-"""Upward propagation: bidirectional adaptation flow (Spec WP4 task 3).
+"""Upward propagation (WP4 task 3).
 
-Two directions of upward signal:
+Two upward steps::
 
-  patients (in centre c) ---aggregate-> cohort_c   adapter update
-  cohorts (all centres)   ---aggregate-> population adapter update (slow)
+    patients (in centre c) --aggregate--> cohort_c adapter
+    cohorts (all centres)  --aggregate--> population adapter (slow)
 
-Weighting schemes supported (Spec WP4 task 3):
-- ``volume``       : weight by sample count
-- ``uniform``      : equal weight
-- ``recency``      : exponential decay by ELAPSED TIME since the newest update
-                     (half-life in days), falling back to position decay with a
-                     warning when no timestamps are available
-- ``uncertainty``  : inverse loss (lower-loss updates carry more weight)
+Weighting schemes, selectable separately for each step:
 
-The scheme is selectable **per level** — the TD asks for a mechanism at
-patient->cohort and another at cohort->population, so a single shared knob could
-not compare them.
+- ``volume``: by sample count - ``uniform``: equal weights - ``recency``:
+exponential decay by time since the newest update (half-life in days); falls back to
+decay by list position, with a warning, when there are no timestamps -
+``uncertainty``: inverse loss (lower loss counts more)
 
-Population update rate is *slower* than cohort/patient — we use an EMA-style
-blend ``population_new = (1-η) * population_old + η * aggregated_cohorts``
-with small ``η`` (default 0.1) to maintain stability per Spec WP4 task 5.
+The population moves slowly: ``population_new = (1 - eta) * population_old + eta *
+aggregated_cohorts`` with a small ``eta`` (default 0.1), for stability (WP4 task 5).
 """
 from __future__ import annotations
 
@@ -60,18 +54,12 @@ def _weights_for(scheme: str, counts: list[int],
                  times: list[int | None] | None = None,
                  half_life_days: float = 180.0,
                  recency_decay: float = 0.9) -> list[float]:
-    """Aggregation weights for one upward-propagation step (Spec WP4 task 3).
+    """Aggregation weights for one upward step (WP4 task 3).
 
-    ``recency`` weights by **elapsed time**, not by list position. The TD asks
-    for "update recency"; decaying by position in the within-round update list
-    does not express that, because every update in a round is equally recent —
-    that arm was arbitrary-order decay under a spec-compliant name. Given real
-    timestamps, an update ``d`` days older than the newest carries weight
-    ``0.5 ** (d / half_life_days)``.
-
-    The position-based decay remains only as a fallback for callers that cannot
-    supply timestamps, and it warns, because a silent fallback here reproduces
-    exactly the defect this parameter exists to fix.
+    ``recency`` decays by elapsed time: an update ``d`` days older than the newest
+    gets weight ``0.5 ** (d / half_life_days)``. Decaying by list position would not
+    mean recency, since every update within a round is equally recent. Position
+    decay remains only as a fallback when there are no timestamps, and it warns.
     """
     if scheme == "volume":
         return [float(c) for c in counts]
@@ -95,7 +83,7 @@ def _weights_for(scheme: str, counts: list[int],
     if scheme == "uncertainty":
         if losses is None:
             raise ValueError("uncertainty weighting requires losses")
-        # inverse loss; clamp to avoid div-by-zero
+        # Inverse loss, clamped to avoid dividing by zero.
         return [1.0 / max(l, 1e-6) for l in losses]
     raise ValueError(f"unknown weighting scheme: {scheme!r}")
 
@@ -110,14 +98,13 @@ def propagate_patients_to_cohort(
     times: list[int | None] | None = None,
     half_life_days: float = 180.0,
 ) -> dict[str, torch.Tensor]:
-    """Apply aggregated patient deltas to the cohort adapter via EMA blending.
+    """Add the aggregated patient deltas to the cohort adapter.
 
     ``new_cohort = cohort + eta_cohort * aggregated_delta``
 
-    Note the keys live in the *patient* adapter namespace but are loaded into
-    the cohort adapter by key suffix (``down.weight``, ``up.weight``, etc.).
-    Both share the same FFNAdapter architecture so the shape match — but the
-    caller is responsible for choosing matching bottleneck sizes.
+    The deltas use ``patient_adapter.*`` keys and are matched to the cohort adapter
+    by key suffix (``down.weight``, ``up.weight``, ...). Both adapters must have the
+    same bottleneck size.
     """
     if not patient_deltas:
         return dict(cohort_state)
@@ -125,19 +112,15 @@ def propagate_patients_to_cohort(
                            times=times, half_life_days=half_life_days)
     agg_delta = weighted_state_average(patient_deltas, weights)
 
-    # Strip the namespace ("patient_adapter." -> "cohort_adapter.") for keys.
-    # The propagation only works when patient_adapter and cohort_adapter share
-    # the same FFNAdapter shape (same bottleneck). Mismatched shapes are skipped
-    # with a warning so the caller can debug; the rest of the cohort state is
-    # left untouched.
+    # Map "patient_adapter." keys to "cohort_adapter.". Keys whose shapes do not
+    # match (different bottleneck) are skipped with a warning, leaving the rest of
+    # the cohort state as it was.
     new_state: dict[str, torch.Tensor] = {}
     skipped: list[str] = []
     for k, v in cohort_state.items():
         if k.startswith("classifier."):
-            # Head keys are namespace-free and identical at both levels, so they
-            # map straight across. Running them through the adapter-renaming
-            # branch would look for "patient_adapter.0.weight" and silently drop
-            # every head delta.
+            # Head keys have no adapter prefix and are the same at both levels, so
+            # they map straight across; renaming them would drop every head delta.
             patient_key = k
         else:
             leaf = k.split(".", 1)[1]
@@ -169,15 +152,12 @@ def propagate_cohorts_to_population(
     times: list[int | None] | None = None,
     half_life_days: float = 180.0,
 ) -> dict[str, torch.Tensor]:
-    """Slow aggregation of cohort adapters into a population-level adapter.
+    """Slowly fold the cohort adapters into the population adapter.
 
-    If the population had no adapter previously, ``population_adapter_state``
-    can be ``None`` -- in which case the aggregated cohort state is scaled by
-    ``eta_population`` and returned (starts from zero).
-
-    Strategy: average cohort adapters by ``scheme``, then EMA-blend into
-    the population adapter slot. Smaller ``eta_population`` => more stable
-    global model (matches Spec WP4 "slow" updates at population level).
+    The cohorts are averaged by ``scheme`` and then blended into the population
+    adapter. If there is no population adapter yet (``None``), the average times
+    ``eta_population`` is returned, i.e. the blend starts from zero. A smaller
+    ``eta_population`` gives a more stable population model (WP4 "slow" updates).
     """
     if not cohort_states:
         return dict(population_adapter_state) if population_adapter_state else {}
@@ -188,7 +168,7 @@ def propagate_cohorts_to_population(
     if population_adapter_state is None:
         return {k: eta_population * v for k, v in agg.items()}
 
-    # EMA blend; population_adapter_state and agg should share keys (same FFNAdapter shape).
+    # Blend; both states have the same keys (same adapter shape).
     out: dict[str, torch.Tensor] = {}
     for k, v in population_adapter_state.items():
         if k in agg:

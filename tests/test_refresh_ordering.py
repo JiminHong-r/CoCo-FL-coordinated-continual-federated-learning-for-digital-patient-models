@@ -1,21 +1,12 @@
-"""The top-down refresh must not alter the state that was just evaluated.
+"""The top-down refresh must not change the state that is about to be evaluated.
 
-The refresh re-seeds cohort adapters FROM the updated population — it is the
-starting point for round r+1. It used to run at the END of ``run_round``, so the
-caller evaluated round r on state that had already been pulled toward the
-population.
-
-The magnitude was not small. At the first sync the population adapter does not
-exist, so ``propagate_cohorts_to_population`` returns
-``eta_population * mean(cohorts)`` = 0.1 * mean. The refresh then computes
-``0.7*cohort + 0.3*(0.1*mean) ≈ 0.73*cohort`` — and the FFN adapter is a RESIDUAL
-that is identity at initialisation, so scaling it by 0.73 moves the model ~27 %
-back toward the UNADAPTED population model, immediately before the reported
-number was taken.
-
-It hit ``hierarchical`` alone: ``top_down_only`` and ``local_finetune`` push the
-sync out of reach and never refresh. ``hierarchical`` selecting round 1 in every
-completed cell while ``fedavg`` selected round 5 is the visible symptom.
+The refresh sets the starting point for the next round. Applying it at the end of a
+round would change round r's state before it is scored. At the first sync the
+population adapter is ``eta_population * mean(cohorts)`` = 0.1 * mean, so the
+refresh gives ``0.7 * cohort + 0.3 * (0.1 * mean)``, about ``0.73 * cohort``. The
+adapter is a residual that starts at the identity, so that pulls the model about 27
+% back towards the un-adapted population model. Only ``hierarchical`` is affected,
+since the other methods never sync.
 """
 from __future__ import annotations
 
@@ -30,7 +21,7 @@ BETA = 0.3
 
 
 def _first_sync_population(cohorts):
-    """What the population adapter is after the FIRST sync: eta * mean."""
+    """The population adapter after the first sync: eta * mean."""
     return propagate_cohorts_to_population(
         None, cohorts, [1] * len(cohorts), eta_population=ETA_POP, scheme="uniform")
 
@@ -47,7 +38,7 @@ def test_population_after_first_sync_is_only_eta_of_the_mean():
 
 
 def test_refresh_attenuates_the_adapter_by_27_percent():
-    """The number that matters: how much of the learned adapter survives."""
+    """How much of the learned adapter survives the refresh."""
     a = {"w": torch.ones(4)}
     pop = _first_sync_population([a, a, a])
     out = _refresh(a, pop)
@@ -57,9 +48,7 @@ def test_refresh_attenuates_the_adapter_by_27_percent():
 
 
 def test_attenuation_moves_a_residual_adapter_toward_identity():
-    """An FFN adapter is identity at init, so shrinking it toward zero moves the
-    model back toward the un-adapted population model — which is precisely the
-    baseline it is supposed to be beating."""
+    """Shrinking an identity-initialised adapter moves the model back towards the un-adapted population model, the baseline it should beat."""
     trained = {"w": torch.tensor([2.0, -2.0])}
     pop = _first_sync_population([trained])
     out = _refresh(trained, pop)
@@ -67,14 +56,13 @@ def test_attenuation_moves_a_residual_adapter_toward_identity():
 
 
 def test_refresh_is_deferred_not_removed():
-    """It still happens — at the start of the next round, where it belongs."""
+    """The refresh still happens, at the start of the next round."""
     import inspect
 
     from cocofl.hierarchical.coordinator import HierarchicalCoordinator
 
-    # `_finish_round` holds step 4 onward and is called at the END of
-    # `run_round`, so concatenating them in call order reproduces the round's
-    # execution order — which is what this test is really pinning.
+    # _finish_round (step 4 onward) is called at the end of run_round, so joining
+    # their sources in call order gives the round's execution order.
     src = (inspect.getsource(HierarchicalCoordinator.run_round)
            + inspect.getsource(HierarchicalCoordinator._finish_round))
     assert "_refresh_pending = True" in src, "sync must schedule a refresh"

@@ -1,22 +1,17 @@
 """Why does patient-adapter selection reject every adapter?
 
-Acceptance compares the personalised model's AUROC against the cohort model's on
-the patient's OWN val slice. If that slice is single-class, ``auc_from_preds``
-returns None, ``a_pers is None``, and the adapter is rejected regardless of
-quality. This measures how often that happens — per task, per ``min_samples``,
-without a GPU.
+Acceptance compares the personalised model's AUROC with the cohort model's on the
+patient's own validation slice. If that slice holds one class, AUROC is None and the
+adapter is rejected whatever its quality. This counts how often that happens, per
+task and per ``min_samples``, without a GPU.
 
-Labels are read through the harness's real ``make_collate`` + ``label_fn`` path.
-That matters: calling ``label_fn`` on a single ``dataset[i]`` result is NOT
-equivalent, because the collate wraps one scalar ``expected`` per sample into a
-batch list, and passing the unwrapped sample yields silent zeros rather than an
-error. An earlier version of this script did exactly that and reported "no
-patient has any positive" for readmission — a 20 %-prevalence task, where that
-would be a ~1e-6 event. If a diagnostic and a base rate disagree, suspect the
-diagnostic.
+Labels go through the harness's real ``make_collate`` and ``label_fn``. Calling
+``label_fn`` on a single ``dataset[i]`` is not the same: the collate wraps each
+``expected`` into a list, and skipping it silently gives all zeros.
 
-  PYTHONPATH=$PROJECT/src_v8 python scripts/diagnose_patient_streams.py \
-      --task readmission --sweep 4,8,16,30,60
+::
+
+    python scripts/diagnose_patient_streams.py --task readmission --sweep 4,8,16,30,60
 """
 from __future__ import annotations
 
@@ -57,8 +52,8 @@ def main() -> None:
     def labels_for(idxs: list[int]) -> list[int]:
         """Labels for these dataset indices, via the real collate path."""
         out: list[int] = []
-        # Length-bucketed padding loader — a plain DataLoader cannot stack these
-        # variable-length token windows.
+        # Length-bucketed loader: a plain DataLoader cannot stack windows of
+        # different lengths.
         loader = make_eval_loader(ds, idxs, collate_fn, batch_size=32)
         with torch.no_grad():
             for batch in loader:

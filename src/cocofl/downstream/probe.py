@@ -1,38 +1,23 @@
-"""Class-imbalance-aware frozen-backbone probe for the WP3 population baselines.
+"""Frozen-backbone probe for the WP3 population baselines, built for class imbalance.
 
-Why this exists
----------------
-The original probe (``finetune.train_head``) fit the MLP head with *unweighted*
-BCE, at ``batch_size=1``, on a 3,000-window uniform draw, and early-stopped on
-validation **loss**. On a low-prevalence task that combination is degenerate:
+The original probe (``finetune.train_head``) fitted the head with unweighted BCE at
+batch 1 on a 3,000-window random draw and kept the checkpoint with the lowest
+validation loss. At ~2 % positives (mortality) that fails: the draw holds about 60
+positives, each step sees a single example, and unweighted BCE is lowest when the
+head just predicts the base rate. It gave a mortality AUROC of 0.589.
 
-* ``hospital_mortality`` runs at ~2 % positives, so a 3,000-window uniform draw
-  carries ~60 positives — and only ~54 of them ever reach the optimiser, since
-  a 1,500-iteration budget at batch 1 sees 1,500 windows total.
-* Every gradient step sees exactly one example, so the update is the label
-  itself, not a class-balanced estimate of the gradient.
-* Unweighted BCE is minimised by predicting the base rate for everybody, and
-  because selection is on that same loss, the checkpoint that gets *kept* is
-  the one closest to the constant predictor. The ranking it produces is close
-  to arbitrary, which is exactly the 0.589 mortality AUROC that came out.
+This probe instead:
 
-What this does instead
-----------------------
-1. Labels every candidate window up front, straight from ``start_indices`` /
-   ``outcome_indices``, without constructing a single window — so the class
-   balance is known *before* anything is fit, and can be reported.
-2. Draws a **class-stratified** training sample: keep every positive, then fill
-   the budget with negatives. The head no longer depends on a lucky draw.
-3. Runs the frozen backbone **once** over the sampled train windows and the
-   test windows, caching the pooled representation. The backbone is frozen, so
-   re-running it every epoch (as the SGD path does) buys nothing.
-4. Fits **class-weighted** logistic regressions on the cached features and
-   selects the regularisation strength by validation **AUROC** — the metric
-   that is actually reported, rather than a loss that rewards the base rate.
+1. Labels every candidate window up front from ``start_indices`` and
+``outcome_indices``, without building any windows, so the class balance is known
+before fitting. 2. Draws a class-stratified training sample: every positive, then
+negatives to fill the budget. 3. Runs the frozen backbone once over the sampled
+windows and caches the features (re-running a frozen backbone every epoch gains
+nothing). 4. Fits class-weighted logistic regressions on the cached features and
+picks the regularisation strength by validation AUROC, the reported metric.
 
-Pooling concatenates the last hidden state (what ``TFNDownstreamClassifier``
-uses) with the mean over the timeline, which gives the linear head a summary of
-the whole window rather than only its final step.
+The features are the last hidden state (what ``TFNDownstreamClassifier`` uses)
+concatenated with the mean over the window.
 """
 from __future__ import annotations
 
@@ -50,32 +35,30 @@ from tqdm import tqdm
 
 from ..evaluation.batching import LengthBucketBatchSampler, sequence_lengths
 
-# Regularisation grid for the balanced logistic head. Selected on validation
-# AUROC; the low end matters because the pooled features are 1024-dimensional
-# and the positive count on mortality is in the low thousands.
+# Regularisation grid for the balanced logistic head, chosen by validation AUROC.
+# The small values matter: the features are 1024-dimensional and mortality has only
+# a few thousand positives.
 C_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)
 
 
 def window_labels(dataset, pos_tokens, horizon_us: float | None = None) -> np.ndarray:
     """Binary label for every sample of ``dataset``, without building windows.
 
-    Equivalent to running ``finetune.label_from_batch`` over the whole dataset:
-    a sample is positive when its outcome token is one of ``pos_tokens`` and —
-    when ``horizon_us`` is set — the outcome falls within that many
-    microseconds of the prediction point. Both facts are already available from
-    the dataset's index tensors, so this costs one vectorised pass instead of
-    ``len(dataset)`` window constructions.
+    Gives the same result as running ``finetune.label_from_batch`` over the dataset:
+    a sample is positive when its outcome token is in ``pos_tokens`` and, if
+    ``horizon_us`` is set, falls within that many microseconds of the prediction
+    point. Both come from the dataset's index tensors, so this is one vectorised
+    pass.
     """
     outcomes = torch.as_tensor(dataset.outcome_indices)
-    # Token positions at which a positive outcome token sits. ``isin`` against
-    # these is the vectorised form of "decode(tokens[outcome_idx]) in pos_tokens".
+    # Token positions holding a positive outcome token; ``isin`` against these is
+    # the vectorised "decode(tokens[outcome_idx]) in pos_tokens".
     pos_positions = dataset._get_indices_of_stokens(sorted(pos_tokens))
     y = torch.isin(outcomes, pos_positions).numpy().astype(np.int8)
 
     if horizon_us is not None:
-        # Only the token-positive rows can be demoted, so the per-index time
-        # lookups (which are not vectorisable over sharded storage) run over a
-        # small subset.
+        # Only rows with a positive token can become negative, so the per-index time
+        # lookups (not vectorisable on sharded storage) run on that small subset.
         starts = torch.as_tensor(dataset.start_indices)
         times = dataset.times
         for i in np.flatnonzero(y):
@@ -92,12 +75,11 @@ def stratified_subsample(
     rng: np.random.Generator,
     max_neg_per_pos: float | None = None,
 ) -> list[int]:
-    """Pick <= ``n_total`` of ``candidates``, keeping as many positives as possible.
+    """Pick at most ``n_total`` of ``candidates``, keeping as many positives as possible.
 
-    A uniform draw is what starves the low-prevalence tasks: at a 2 % base rate
-    a 3,000-window draw holds ~60 positives. Here positives are taken first (up
-    to half the budget, so a high-prevalence task cannot end up all-positive)
-    and negatives fill the remainder.
+    Positives are taken first, up to half the budget (so a common outcome cannot end
+    up all-positive), and negatives fill the rest. A random draw at a 2 % base rate
+    would hold only ~60 positives in 3,000 windows.
     """
     candidates = np.asarray(list(candidates), dtype=np.int64)
     labels = y[candidates]
@@ -125,18 +107,15 @@ def fit_torch_head(X_tr, y_tr, X_va, y_va, hidden: int, device,
                    seed: int = 42):
     """Fit the MLP head that ``TFNDownstreamClassifier`` uses, on cached features.
 
-    Why this exists: the population checkpoint contains only the backbone and
-    its language-model head, so ``TFNDownstreamClassifier(backbone)`` starts
-    with a **randomly initialised** classifier. WP4/WP5 therefore began from
-    backbone + noise rather than from the WP3 population model, which made
-    ``population_only`` a chance-level baseline and ``delta_cohort`` a measure
-    of "was a head trained at all". Fitting it here once on the reserve gives
-    every downstream level the population model the project description assumes.
+    The population checkpoint holds only the backbone, so
+    ``TFNDownstreamClassifier`` would otherwise start with a random head and
+    ``population_only`` would score at chance. Fitting it once here, on the reserve,
+    gives every downstream level the real population model.
 
-    Features must be LAST-token pooled (``pooling="last"``) because that is what
+    Features must use last-token pooling (``pooling="last"``), because that is what
     ``TFNDownstreamClassifier.forward`` feeds its head.
 
-    Returns ``(state_dict, val_auroc)`` where the state dict drops straight into
+    Returns ``(state_dict, val_auroc)``; the state dict loads straight into
     ``TFNDownstreamClassifier.classifier``.
     """
     torch.manual_seed(seed)
@@ -150,8 +129,8 @@ def fit_torch_head(X_tr, y_tr, X_va, y_va, hidden: int, device,
     Xt = torch.as_tensor(X_tr, dtype=torch.float32, device=device)
     yt = torch.as_tensor(np.asarray(y_tr), dtype=torch.float32, device=device)
     Xv = torch.as_tensor(X_va, dtype=torch.float32, device=device)
-    # Class-weighted, for the same reason the logistic probe is: at ~2 %
-    # prevalence an unweighted head learns the base rate.
+    # Class-weighted, like the logistic probe: at ~2 % prevalence an unweighted head
+    # learns the base rate.
     n_pos = float(yt.sum().item())
     pos_weight = torch.tensor(
         (len(yt) - n_pos) / max(n_pos, 1.0), device=device, dtype=torch.float32,
@@ -177,8 +156,7 @@ def fit_torch_head(X_tr, y_tr, X_va, y_va, hidden: int, device,
             p = torch.sigmoid(head(Xv).view(-1)).cpu().numpy()
         if len(np.unique(y_va)) > 1:
             auc = roc_auc_score(y_va, p)
-            # Select on validation AUROC, never on loss — same trap as the
-            # original probe, which kept the checkpoint closest to the prior.
+            # Select on validation AUROC, never on loss.
             if auc > best_auc:
                 best_auc, best_state = auc, copy.deepcopy(head.state_dict())
     head.load_state_dict(best_state)
@@ -196,12 +174,11 @@ def extract_features(
     desc: str = "features",
     pooling: str = "last_mean",
 ) -> np.ndarray:
-    """Pooled frozen-backbone representation for each of ``indices``.
+    """Pooled frozen-backbone features for each of ``indices``.
 
-    Row ``k`` of the result corresponds to ``indices[k]``. Batches are bucketed
-    by exact sequence length (see ``evaluation.batching``) so no padding ever
-    enters the T-LSTM recurrence and each row is identical to what a
-    ``batch_size=1`` pass would produce.
+    Row ``k`` belongs to ``indices[k]``. Batches are grouped by exact sequence
+    length (see ``evaluation.batching``), so there is no padding and every row
+    matches a ``batch_size=1`` pass.
     """
     indices = list(indices)
     lengths = sequence_lengths(dataset, indices) if batch_size > 1 else None
@@ -231,10 +208,10 @@ def extract_features(
             static_categorical=cat.to(device), static_numerical=num.to(device),
             labels=None,
         ).hidden_states
-        # ``last`` matches what TFNDownstreamClassifier.forward feeds its head,
-        # so a head fitted on these features drops straight into that model.
-        # ``last_mean`` adds a whole-window summary, which helps the linear
-        # probe but has no slot in the existing classifier.
+        # "last" is what TFNDownstreamClassifier.forward feeds its head, so a head
+        # fitted on it loads straight into that model. "last_mean" adds a
+        # whole-window summary, which helps the linear probe but has no slot in the
+        # classifier.
         if pooling == "last":
             pooled = hidden[:, -1, :]
         elif pooling == "last_mean":
@@ -251,12 +228,10 @@ def extract_features(
 
 
 def fit_balanced_probe(X_tr, y_tr, X_va, y_va, seed: int = 42, c_grid=C_GRID):
-    """Class-weighted logistic head, regularisation picked on validation AUROC.
+    """Class-weighted logistic head, with the regularisation picked on validation AUROC.
 
-    ``class_weight="balanced"`` scales each class's contribution by the inverse
-    of its frequency, so the minority class carries the same total weight as
-    the majority one — the "higher penalty on the rare class" fix, applied to
-    the loss the head is actually fit with.
+    ``class_weight="balanced"`` weights each class by the inverse of its frequency,
+    so the rare class counts as much in total as the common one.
     """
     best, best_key = None, -float("inf")
     for c in c_grid:
@@ -267,8 +242,8 @@ def fit_balanced_probe(X_tr, y_tr, X_va, y_va, seed: int = 42, c_grid=C_GRID):
             ),
         )
         clf.fit(X_tr, y_tr)
-        # A single-class validation split leaves AUROC undefined; keep fitting
-        # so the caller still gets a head, but never let it drive selection.
+        # A single-class validation split has no AUROC; still fit, so the caller
+        # gets a head, but do not let it drive selection.
         auc = (
             roc_auc_score(y_va, clf.predict_proba(X_va)[:, 1])
             if len(np.unique(y_va)) > 1
@@ -282,7 +257,7 @@ def fit_balanced_probe(X_tr, y_tr, X_va, y_va, seed: int = 42, c_grid=C_GRID):
 
 
 def score(clf, X, y) -> dict[str, float | None]:
-    """Test-set AUROC/AUPRC plus the prevalence they were measured at."""
+    """Test AUROC and AUPRC, plus the prevalence they were measured at."""
     p = clf.predict_proba(X)[:, 1]
     if len(np.unique(y)) < 2:
         return {"auc": None, "auprc": None, "n": len(y), "n_pos": int(y.sum())}

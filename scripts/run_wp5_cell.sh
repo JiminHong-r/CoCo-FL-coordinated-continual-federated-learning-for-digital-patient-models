@@ -1,24 +1,15 @@
 #!/bin/bash
-# ONE WP5 cell = one (split, task, α). Its own process, its own GPU, its own
-# output dir.
+# Run one WP5 cell, i.e. one (split, task, alpha), in its own process with its own
+# output folder. If a run crashes you lose only that cell, and cells can run on
+# different GPUs at the same time. All settings come from wp5_common.sh, so every
+# cell is comparable; only the split, task and alpha change.
 #
-# WHY PER-CELL
-# ------------
-# The per-task runners loop α inside a single process, which has cost us twice:
-# a task that died mid-α took the whole task's output with it (readmission left
-# an empty dir after 5 h), and a 3-α sweep is forced to run sequentially even
-# when GPUs are idle. One cell per process fixes both — a crash loses one cell,
-# and the α sweep fans out across cards.
-#
-# Config comes from wp5_common.sh, so a cell is comparable to every other run by
-# construction. The only thing that varies is which split/task/α it points at.
-#
-# USAGE
+# Usage:
 #   GPU=0 SPLIT=classaware TASK=hospital_mortality ALPHA=1.0 \
 #     bash scripts/run_wp5_cell.sh
 #
-#   SPLIT is `random` or `classaware` (or an absolute path to a splits dir).
-#   Output: results_v8_<split>_<task>_a<alpha>/wp5_results.csv
+# SPLIT is `random`, `classaware`, or an absolute path to a splits folder. Output:
+# results_<TAG>_<split>_<task>_a<alpha>/wp5_results.csv
 set -o pipefail
 
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -45,16 +36,10 @@ esac
 POP_MODEL=${POP_MODEL:-$PROJECT/models/population_reserve_nonotes_full/best_model.pt}
 COHORT=${COHORT:-$PROJECT/data/tokenized/mimic_train}
 
-# --- pre-flight VRAM gate ---------------------------------------------------
-# The box is SHARED. A class-aware α=1.0 cell ran 11.7 h and then died of CUDA
-# OOM because another user's notebook kernel had taken 43 of the card's 47 GiB;
-# our process never got above 4.4 GiB. Nothing was wrong with the run — it was
-# simply started on a card that could not hold it.
-#
-# A cell needs ~6 GiB. Wait for that much to be free before starting, rather
-# than launching into a starved card and finding out half a day later. This
-# cannot prevent an OOM caused by someone allocating *after* we start; it only
-# stops us from beginning a doomed run.
+# Wait for enough free GPU memory before starting. The server is shared: a cell once
+# died of out-of-memory after 11.7 h because another user had taken most of the
+# card. A cell uses about 6 GiB; we wait for NEED_MIB to be free. This cannot stop
+# someone else allocating memory after we start.
 NEED_MIB=${NEED_MIB:-8000}
 GATE_WAIT_MIN=${GATE_WAIT_MIN:-180}
 gate_deadline=$(( $(date +%s) + GATE_WAIT_MIN * 60 ))
@@ -72,14 +57,9 @@ while :; do
 done
 OUT=$PROJECT/results_${TAG}_${SPLIT}_${TASK}_a${ALPHA}
 
-# Never start on top of an existing result. A stale wp5_results.csv left in the
-# target dir is indistinguishable from this run's own output until the run
-# finishes, and anything that polls the dir for progress will read the OLD file
-# and believe the new run has already produced results. That is not
-# hypothetical: a June-25 CSV sitting in a reused output dir caused a live α=0.5
-# run to be killed 1.5 h in, because a "has α=0.5 finished?" check matched the
-# stale rows. Archive with a timestamp rather than delete — the old numbers are
-# still evidence of what was run when.
+# Never write on top of an old result. A leftover wp5_results.csv looks exactly like
+# this run's output, and a progress check once killed a live run because of one.
+# Move the old folder aside with a timestamp instead of deleting it.
 if [ -e "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
   ARCHIVE="$OUT.stale_$(date +%Y%m%d_%H%M%S)"
   mv "$OUT" "$ARCHIVE"
@@ -100,8 +80,8 @@ echo "============================================================"
 
 cocofl_evaluate "${WP5_COMMON[@]}" output_dir="$OUT" 2>&1 | tee "$OUT.log"
 
-# Check the artefact, not the exit status — the pipe to tee masks it, which is
-# how a dead task previously reported success.
+# Check for the output file, not the exit status: the pipe to tee hides the exit
+# status.
 if [ -s "$OUT/wp5_results.csv" ]; then
   echo "[$(date)] CELL OK: $OUT/wp5_results.csv ($(wc -l < "$OUT/wp5_results.csv") lines)"
 else

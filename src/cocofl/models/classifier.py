@@ -1,7 +1,7 @@
-"""Downstream classifier for TFNFullModel.
+"""Downstream classifier on top of TFNFullModel.
 
-Extracts the last-timestep hidden representation from TFNFullModel and adds an
-MLP head for binary classification. The backbone is frozen during fine-tuning.
+Takes the last-timestep hidden state and adds an MLP head for binary classification.
+The backbone is frozen.
 """
 import torch.nn as nn
 
@@ -26,7 +26,7 @@ class TFNDownstreamClassifier(nn.Module):
             static_numerical=static_numerical,
             labels=None,
         )
-        # last-timestep representation: (B, n_embd)
+        # Last-timestep representation: (B, n_embd)
         pooled = out.hidden_states[:, -1, :]
         logits = self.classifier(pooled)
         return logits.squeeze(-1) if logits.size(-1) == 1 else logits

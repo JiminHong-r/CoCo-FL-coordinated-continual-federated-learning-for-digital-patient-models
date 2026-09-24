@@ -1,15 +1,10 @@
 #!/bin/bash
-# Smoke-test every WP4 knob that has never run on real data, at a tiny budget.
+# Smoke-test the WP4 settings that the reported grid does not use (per-level
+# weighting, time-based recency, "after N patient updates", per-level CL strength),
+# at a tiny budget. Unit tests only check them against fakes; this spends about ten
+# minutes checking that each one reaches the coordinator and completes a round.
 #
-# WHY: the full grid is ~42 GPU-hours. The task-3/4/5 plumbing added on
-# 2026-08-11 (per-level weighting, time-based recency, "after N patient updates",
-# per-level CL strength) has only ever been exercised by unit tests against
-# fakes. This project's history is of configurations that run for hours and then
-# turn out to have been no-ops or crashes — `uncertainty` died on a missing kwarg
-# after 25 h, `recency` decayed by list position for weeks. Spend ten minutes
-# proving each knob reaches the coordinator and completes a round.
-#
-#   GPU=1 bash scripts/smoke_wp4_knobs.sh
+# GPU=1 bash scripts/smoke_wp4_knobs.sh
 set -o pipefail
 PROJECT="${PROJECT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export CODE_SRC=${CODE_SRC:-$PROJECT/src}

@@ -1,34 +1,22 @@
 #!/usr/bin/env bash
-# Population baselines (WP3 tasks 3-4) with the class-imbalance-aware probe.
+# Population baselines (WP3 tasks 3-4) and the per-task heads that WP4/WP5 load.
 #
-# Replaces the head-probe invocation inside run_wp2_pipeline_v2.sh. Same
-# leakage-free protocol — head fit on the 40% population reserve only
-# (train_restrict_path), scored on the disjoint 10% global test (global_test_path,
-# n_eval_samples=0 -> every window) — but the head itself is now:
+# The head is fitted on the 40 % population reserve only and scored on every window
+# of the separate 10 % global test set. To cope with the rare positive class it is:
+#   * fitted on a class-stratified draw (every positive kept),
+#   * fitted with class_weight="balanced",
+#   * chosen by validation AUROC, not validation loss.
+# An unweighted fit chosen by loss mostly learns to predict the base rate at ~2 %
+# prevalence (see src/cocofl/downstream/probe.py).
 #
-#   * fit on a CLASS-STRATIFIED draw (every positive kept), not a uniform one,
-#   * fit with class_weight="balanced" (the rare class carries equal total
-#     weight), not unweighted BCE,
-#   * selected on validation AUROC, not validation loss.
-#
-# The old protocol reported mortality at 0.589 / readmission at 0.666; at ~2%
-# prevalence its selection rule rewarded predicting the base rate. See
-# src/cocofl/downstream/probe.py for the full argument.
-#
-# Run this ON THE SERVER (needs the tokenized cohort, the population checkpoint
-# and a GPU). Override paths via env vars or edit the defaults below.
-#
+# Run on the server (it needs the tokenised cohort, the backbone and a GPU):
 #   PROJECT=/path/to/coco-fl bash scripts/run_population_baseline.sh
-#
 set -euo pipefail
 
 PROJECT="${PROJECT:-$(cd "$(dirname "$0")/.." && pwd)}"
-# Code tree. MUST be set to the tree carrying the elapsed-times fix: without it
-# the probe feeds the T-LSTM elapsed=1.0 for every token, which pins the time
-# decay at a constant 0.7615 and fits the head on features the backbone does not
-# actually produce. That is how the heads in models/population_heads/ were built.
-# The console scripts live in the project venv; this script used to rely on the
-# caller's PATH, so a detached launch failed with "cocofl_finetune: not found".
+# Use the project venv's console scripts and the given code tree. The code must
+# include the elapsed-time fix, or the probe feeds the T-LSTM a constant time gap
+# and the heads are fitted on the wrong features.
 export PATH="${VENV:-$PROJECT/venv}/bin:$PATH"
 export PYTHONPATH="${CODE_SRC:-$PROJECT/src}"
 export PYTHONUNBUFFERED=1
@@ -38,15 +26,14 @@ COHORT_DIR="${COHORT_DIR:-$PROJECT/data/tokenized/mimic_train}"
 POP_OUT="${POP_OUT:-$PROJECT/models/population_reserve_nonotes_full}"
 GLOBAL_TEST="${GLOBAL_TEST:-$PROJECT/data/federated_splits_v2/global_test.json}"
 POP_RESERVE="${POP_RESERVE:-$PROJECT/data/federated_splits_v2/population_reserve.json}"
-# Training windows drawn from the reserve. Positives are kept first, so this is
-# a cap on the NEGATIVES more than anything; raise it if a task is still short.
+# Training windows drawn from the reserve. Positives are kept first, so this mostly
+# caps the negatives.
 N_TRAIN="${N_TRAIN:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 TASKS="${TASKS:-all}"
 OUT="${OUT:-$PROJECT/results_population_balanced}"
-# Where the per-task torch heads are written. These are what WP4/WP5 load via
-# +population_head_dir, so refitting the baseline and refitting the heads must be
-# the SAME run — otherwise the heads and the reported baseline disagree.
+# Where the per-task heads go. WP4/WP5 load them via +population_head_dir, so the
+# heads and the reported baseline must come from the same run.
 HEAD_DIR="${HEAD_DIR:-$PROJECT/models/population_heads}"
 
 echo "[$(date)] population baselines — balanced probe"
@@ -59,8 +46,8 @@ echo "  heads      : $HEAD_DIR"
 
 task_arg=()
 if [ "$TASKS" != "all" ]; then
-  # Hydra needs list syntax for multiple values: +tasks=[a,b,c]. A bare
-  # comma-separated string is "ambiguous" and aborts the run.
+  # Hydra needs list syntax for several values: +tasks=[a,b,c]. A plain
+  # comma-separated string aborts the run.
   case "$TASKS" in
     \[*\]) task_arg=("+tasks=$TASKS") ;;
     *)      task_arg=("+tasks=[$TASKS]") ;;

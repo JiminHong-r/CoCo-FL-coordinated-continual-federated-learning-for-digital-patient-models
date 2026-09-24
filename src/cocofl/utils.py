@@ -26,13 +26,9 @@ def setup_torch(device, dtype, seed=42):
 
 
 def load_model_checkpoint(checkpoint_fp: str | Path, **kwargs) -> tuple[TFNFullModel, dict]:
-    """Rebuild the population backbone from a checkpoint, **kwargs go to `torch.load`.
+    """Rebuild the population backbone from a checkpoint; ``**kwargs`` go to ``torch.load``.
 
-    This used to reconstruct a GPT2LMNoBiasModel or an EncoderDecoderModel from
-    ``model_config.is_encoder_decoder``. TFNFullModel's config is a SimpleNamespace
-    with no such attribute, so resuming a population run raised AttributeError —
-    the only checkpoints this project produces were the ones it could not load.
-    Reconstruction now matches ``build_population_classifier``.
+    Rebuilds a ``TFNFullModel`` the same way ``build_population_classifier`` does.
     """
     checkpoint = th.load(checkpoint_fp, weights_only=False, **kwargs)
     cfg = checkpoint["model_config"]
@@ -55,13 +51,12 @@ def load_model_checkpoint(checkpoint_fp: str | Path, **kwargs) -> tuple[TFNFullM
 
 
 def dump_config(cfg, path) -> None:
-    """Write the resolved config beside the results. Never fail the run over it.
+    """Write the resolved config next to the results, without ever failing the run.
 
-    ``resolve=True`` evaluates interpolations, which is what makes the dump
-    useful — it records the paths actually used, not ``${...}``. A config that
-    interpolates through a custom resolver can raise here, and a run that takes
-    hours must not die at minute zero because its provenance file could not be
-    written, so an unresolved dump is better than no run.
+    ``resolve=True`` fills in interpolations, so the file records the real paths
+    rather than ``${...}``. If resolving fails (e.g. a custom resolver), an
+    unresolved dump is written instead; a long run should not stop over its record
+    file.
     """
     from omegaconf import OmegaConf
 
