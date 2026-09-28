@@ -19,16 +19,13 @@ results_for_presentation/
 *.log
 
 # --- Notebooks ---------------------------------------------------------------
-# Exploratory/label-dump notebooks are development history. figures.ipynb is
-# kept for the figure definitions it carries (figure3, figure5, ethos_*), but
-# it does NOT run against this package: every notebook here still imports the
-# upstream `ethos.*` modules this fork renamed, and `ethos.tfn` has no
-# equivalent at all. Treat it as a record of how the figures were made.
-notebooks/*
-!notebooks/figures.ipynb
+# Exploratory and figure notebooks are kept locally only.
+notebooks/
+*.ipynb
 
 # --- Documents (local only) --------------------------------------------------
 *.pdf
+*.zip
 CoCoFL_report/
 
 # --- Python ------------------------------------------------------------------

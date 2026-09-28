@@ -31,7 +31,8 @@ from cocofl.vocabulary import Vocabulary
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cohort", default="/home/jimin_hong/coco-fl/data/tokenized/mimic_train")
+    ap.add_argument("--cohort", default=str(Path(__file__).resolve().parents[1]
+                                            / "data" / "tokenized" / "mimic_train"))
     ap.add_argument("--task", default="hospital_mortality")
     ap.add_argument("--min-samples", type=int, default=60)
     ap.add_argument("--max-patients", type=int, default=40)

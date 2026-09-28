@@ -81,7 +81,7 @@ python scripts/wp2_alpha_sweep.py \
 # Step 3 (task 3): pre-train the backbone on the 40 % reserve only.
 # population_reserve_path keeps every centre and global-test patient out of it.
 echo "[task 3] pre-training population backbone (static + T-LSTM) on the 40% reserve"
-NUM_GPUS=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+NUM_GPUS=${NUM_GPUS:-$(nvidia-smi --list-gpus 2>/dev/null | wc -l)}
 torchrun --no_python --standalone --nproc_per_node=${NUM_GPUS:-1} cocofl_train \
   --config-name=population_training \
   data_fp=$COHORT_DIR \
